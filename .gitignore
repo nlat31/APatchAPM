@@ -1,0 +1,98 @@
+# =========================
+# OS / Editor / IDE
+# =========================
+.DS_Store
+Thumbs.db
+
+*.swp
+*.swo
+*~
+
+.vscode/
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Eclipse
+.classpath
+.project
+.settings/
+
+# =========================
+# CMake / Native builds
+# =========================
+build/
+out/
+
+**/CMakeFiles/
+**/CMakeCache.txt
+**/cmake_install.cmake
+**/Makefile
+**/compile_commands.json
+**/*.ninja
+**/*.ninja_deps
+**/*.ninja_log
+**/rules.ninja
+
+cmake-build-*/
+
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+
+# =========================
+# Android / Gradle / Java
+# =========================
+**/.gradle/
+**/build/
+**/out/
+
+# Android Studio / externalNativeBuild outputs
+**/.cxx/
+**/externalNativeBuild/
+
+# Local SDK/NDK path config
+**/local.properties
+
+# Log/captures
+**/captures/
+
+# Android packaged artifacts
+*.apk
+*.ap_
+*.aab
+*.aar
+
+# Java/Kotlin compilation outputs
+*.class
+*.dex
+
+# Keystores / signing (do NOT commit)
+*.jks
+*.keystore
+*.p12
+*.pfx
+key.properties
+keystore.properties
+
+# =========================
+# Tools / temp caches
+# =========================
+tools/ninja-*/
+temp/
+
+# If you generate dex via compile_hook.sh, keep it out of git by default
+modules/*/magisk/classes.dex
+
+# =========================
+# Fetched dependencies (setup.sh downloads these)
+# =========================
+external/dobby/
+external/lsplant/
+external/zygisk/
+

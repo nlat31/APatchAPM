@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.SampleSettings" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/sample_primary</item>
+        <item name="colorPrimaryVariant">@color/sample_primary_variant</item>
+        <item name="colorOnPrimary">@color/sample_on_primary</item>
+
+        <item name="colorSecondary">@color/sample_secondary</item>
+        <item name="colorSecondaryVariant">@color/sample_secondary_variant</item>
+        <item name="colorOnSecondary">@color/sample_on_secondary</item>
+
+        <item name="colorSurface">@color/sample_surface</item>
+        <item name="colorOnSurface">@color/sample_on_surface</item>
+    </style>
+</resources>
+

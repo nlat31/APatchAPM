@@ -1,0 +1,7 @@
+id=envcloak
+name=EnvCloak
+version=v1.0.0
+versionCode=1
+author=developer
+description=Anti startup checks (install source, dev options, VPN, etc.)
+
