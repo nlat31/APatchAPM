@@ -135,11 +135,16 @@ static std::vector<std::string> parse_string_array_by_key(const std::string &s, 
 
 static bool matches_any_package(const std::string &process_name, const std::vector<std::string> &pkgs) {
     for (const auto &p : pkgs) {
+        if (p.empty()) continue;
+        // Prefix match so one package entry can cover its child process names.
+        // Typical Android process names:
+        // - com.example.app
+        // - com.example.app:remote
+        // Some ROMs / components may also use dot-suffixed names.
         if (process_name == p) return true;
-        if (process_name.size() > p.size() &&
-            process_name.compare(0, p.size(), p) == 0 &&
-            process_name[p.size()] == ':') {
-            return true;
+        if (process_name.size() > p.size() && process_name.compare(0, p.size(), p) == 0) {
+            char next = process_name[p.size()];
+            if (next == ':' || next == '.') return true;
         }
     }
     return false;
@@ -227,7 +232,9 @@ public:
              ZMOD_ID, getpid(), nice_name ? nice_name : "null", args->uid);
 
         const auto &cfg = load_config_cached();
-        should_inject_ = (args->uid >= 10000) && matches_any_package(proc, cfg.packages);
+        // Respect UI config: allow both user apps and system apps as long as they are selected.
+        // (UI can toggle "show system apps" and write them into packages.)
+        should_inject_ = matches_any_package(proc, cfg.packages);
         hook_native_ = should_inject_ && cfg.hook_native;
         hook_java_ = should_inject_ && cfg.hook_java;
 

@@ -100,8 +100,15 @@ for mod_dir in "$PROJECT_DIR"/modules/*; do
 
   echo "==> [$mod_id] Converting to DEX"
   if [ -n "$D8_BIN" ]; then
+      # d8 expects .class/.jar/.zip as program inputs (passing a directory may fail)
+      CLASS_FILES=()
+      while IFS= read -r -d '' f; do CLASS_FILES+=("$f"); done < <(find "$tmp_dir" -type f -name "*.class" -print0)
+      if [[ "${#CLASS_FILES[@]}" -eq 0 ]]; then
+          echo "Error: no .class files produced by javac for $mod_id" >&2
+          exit 1
+      fi
       # d8 output directory will contain classes.dex
-      "$D8_BIN" --output "$out_dir" "$tmp_dir"
+      "$D8_BIN" --output "$out_dir" "${CLASS_FILES[@]}"
   else
       # dx needs class files as inputs
       CLASS_FILES=()

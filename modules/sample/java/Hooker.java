@@ -7,7 +7,7 @@ import java.lang.reflect.Modifier;
 public class Hooker {
     private static final String TAG = "Sample/Hooker";
 
-    public static Method backupSystemLoadLibrary;
+    public static Method backupActivityThreadMain;
 
     private static void logI(String msg) {
         try {
@@ -16,14 +16,6 @@ public class Hooker {
             i.invoke(null, TAG, msg);
         } catch (Throwable ignored) {
         }
-    }
-
-    private static String firstStringArg(Object[] args) {
-        if (args == null) return null;
-        for (Object a : args) {
-            if (a instanceof String) return (String) a;
-        }
-        return null;
     }
 
     private static Object callBackup(Method backup, Object[] args) throws Throwable {
@@ -47,11 +39,11 @@ public class Hooker {
         }
     }
 
-    // Hook target: java.lang.System.loadLibrary(String)
-    public Object hookSystemLoadLibrary(Object[] args) throws Throwable {
-        String lib = firstStringArg(args);
-        logI("System.loadLibrary: " + lib);
-        callBackup(backupSystemLoadLibrary, args);
+    // Demo hook target: android.app.ActivityThread.main(String[] args)
+    // This is the app process entrypoint and is always called.
+    public Object hookActivityThreadMain(Object[] args) throws Throwable {
+        logI("ActivityThread.main");
+        callBackup(backupActivityThreadMain, args);
         return null;
     }
 }

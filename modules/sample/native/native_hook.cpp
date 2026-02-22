@@ -26,25 +26,28 @@ static inline void *to_void_ptr(T fn_or_ptr) {
 namespace sample {
 namespace native_hook {
 
-using loader_dlopen_t = void *(*)(const char *filename, int flags, const void *caller_addr);
-static loader_dlopen_t orig___loader_dlopen = nullptr;
+// Prefer hooking android_dlopen_ext which is a stable, exported libdl API on Android.
+// Signature: void* android_dlopen_ext(const char* filename, int flags, const android_dlextinfo* extinfo);
+// We keep the third parameter as void* to avoid depending on platform headers.
+using android_dlopen_ext_t = void *(*)(const char *filename, int flags, const void *extinfo);
+static android_dlopen_ext_t orig_android_dlopen_ext = nullptr;
 
-static void *hooked___loader_dlopen(const char *filename, int flags, const void *caller_addr) {
-    LOGI("[%s] __loader_dlopen(filename=%s, flags=0x%x, caller=%p)",
+static void *hooked_android_dlopen_ext(const char *filename, int flags, const void *extinfo) {
+    LOGI("[%s] android_dlopen_ext(filename=%s, flags=0x%x, extinfo=%p)",
          ZMOD_ID,
          filename ? filename : "null",
          flags,
-         caller_addr);
-    return orig___loader_dlopen ? orig___loader_dlopen(filename, flags, caller_addr) : nullptr;
+         extinfo);
+    return orig_android_dlopen_ext ? orig_android_dlopen_ext(filename, flags, extinfo) : nullptr;
 }
 
-static void *resolve_loader_dlopen() {
-    void *sym = dlsym(RTLD_DEFAULT, "__loader_dlopen");
+static void *resolve_android_dlopen_ext() {
+    void *sym = dlsym(RTLD_DEFAULT, "android_dlopen_ext");
     if (sym) return sym;
 
     void *libdl = dlopen("libdl.so", RTLD_NOW);
     if (libdl) {
-        sym = dlsym(libdl, "__loader_dlopen");
+        sym = dlsym(libdl, "android_dlopen_ext");
         // Keep libdl loaded (do not dlclose) – safe for template module.
         if (sym) return sym;
     }
@@ -54,18 +57,18 @@ static void *resolve_loader_dlopen() {
 void install_hooks() {
     LOGI("[%s] Installing native hooks...", ZMOD_ID);
 
-    void *target = resolve_loader_dlopen();
+    void *target = resolve_android_dlopen_ext();
     if (!target) {
-        LOGW("[%s] Symbol not found: __loader_dlopen (Android version/linker may hide it)", ZMOD_ID);
+        LOGW("[%s] Symbol not found: android_dlopen_ext", ZMOD_ID);
         return;
     }
 
     void *orig = nullptr;
-    if (DobbyHook(target, to_void_ptr(hooked___loader_dlopen), &orig) == 0 && orig) {
-        orig___loader_dlopen = reinterpret_cast<loader_dlopen_t>(orig);
-        LOGI("[%s] Hooked __loader_dlopen @ %p", ZMOD_ID, target);
+    if (DobbyHook(target, to_void_ptr(hooked_android_dlopen_ext), &orig) == 0 && orig) {
+        orig_android_dlopen_ext = reinterpret_cast<android_dlopen_ext_t>(orig);
+        LOGI("[%s] Hooked android_dlopen_ext @ %p", ZMOD_ID, target);
     } else {
-        LOGE("[%s] Failed to hook __loader_dlopen @ %p", ZMOD_ID, target);
+        LOGE("[%s] Failed to hook android_dlopen_ext @ %p", ZMOD_ID, target);
     }
 }
 

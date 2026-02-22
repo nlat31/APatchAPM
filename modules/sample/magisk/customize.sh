@@ -8,12 +8,15 @@
 # in Magisk UI even though the zip itself is fine.
 
 # 检查 Zygisk 是否启用
-if [ "$ZYGISK_ENABLED" ]; then
+case "${ZYGISK_ENABLED:-}" in
+  1|true|TRUE|yes|YES)
     ui_print "- Zygisk is enabled"
-else
+    ;;
+  *)
     ui_print "- Magisk built-in Zygisk is not enabled (OK if you use Zygisk Next)"
     ui_print "  If you're using Zygisk Next, keep Magisk Zygisk disabled to avoid conflicts."
-fi
+    ;;
+esac
 
 # 设置权限
 ui_print "- Setting permissions"

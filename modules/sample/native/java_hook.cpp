@@ -175,26 +175,27 @@ void install_hooks(JNIEnv *env, const std::vector<uint8_t> &dex_data) {
     }
     g_hooker_inst = env->NewGlobalRef(inst);
 
-    jclass sys_cls = find_class(env, "java/lang/System");
-    if (!sys_cls) {
-        LOGE("[%s] java/lang/System not found", ZMOD_ID);
+    // Demo: hook ActivityThread.main(String[]) which is the app process entrypoint (static).
+    jclass at_cls = find_class(env, "android/app/ActivityThread");
+    if (!at_cls) {
+        LOGE("[%s] android/app/ActivityThread not found", ZMOD_ID);
         return;
     }
 
-    jmethodID target_mid = find_method(env, sys_cls, "loadLibrary", "(Ljava/lang/String;)V", true);
-    jobject target_method = to_reflected_method(env, sys_cls, target_mid, true);
+    jmethodID target_mid = find_method(env, at_cls, "main", "([Ljava/lang/String;)V", true);
+    jobject target_method = to_reflected_method(env, at_cls, target_mid, true);
     if (!target_method) {
-        LOGE("[%s] Failed to reflect System.loadLibrary", ZMOD_ID);
+        LOGE("[%s] Failed to reflect ActivityThread.main", ZMOD_ID);
         return;
     }
 
     if (hook_and_save_backup(env, target_method,
-                             "hookSystemLoadLibrary",
+                             "hookActivityThreadMain",
                              "([Ljava/lang/Object;)Ljava/lang/Object;",
-                             "backupSystemLoadLibrary")) {
-        LOGI("[%s] Hooked System.loadLibrary", ZMOD_ID);
+                             "backupActivityThreadMain")) {
+        LOGI("[%s] Hooked ActivityThread.main", ZMOD_ID);
     } else {
-        LOGE("[%s] Failed to hook System.loadLibrary", ZMOD_ID);
+        LOGE("[%s] Failed to hook ActivityThread.main", ZMOD_ID);
     }
 }
 

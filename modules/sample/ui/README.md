@@ -19,9 +19,9 @@
 ```
 
 模块逻辑：
-- 只有 `packages` 中被勾选的 app 才会被注入（按进程名匹配 `包名` 或 `包名:xxx`）
-- `hook_native=true` 才会 hook `__loader_dlopen`
-- `hook_java=true` 才会 hook `System.loadLibrary`
+- 只有 `packages` 中被勾选的 app 才会被注入（按进程名**前缀**匹配：`包名` / `包名:xxx` / `包名.xxx`）
+- `hook_native=true` 才会 hook `android_dlopen_ext`
+- `hook_java=true` 才会 hook `ActivityThread.main`
 - 两项都为 false：只注入不执行 hook
 
 

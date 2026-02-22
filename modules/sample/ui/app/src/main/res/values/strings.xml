@@ -5,8 +5,8 @@
     <string name="tab_options">Options</string>
     <string name="apply">Apply</string>
     <string name="show_system_apps">Show system apps</string>
-    <string name="hook_native">Hook native (__loader_dlopen)</string>
-    <string name="hook_java">Hook java (System.loadLibrary)</string>
+    <string name="hook_native">Hook native (android_dlopen_ext)</string>
+    <string name="hook_java">Hook java (ActivityThread.main)</string>
     <string name="root_required">Root permission is required to read/write /data/adb.</string>
 </resources>
 
