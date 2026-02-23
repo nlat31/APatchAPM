@@ -4,7 +4,7 @@ include(CMakeParseArguments)
 
 function(add_zygisk_module)
     set(options)
-    set(oneValueArgs NAME MODULE_ID EXPORT_MAP OUTPUT_ROOT HOOKER_CLASS)
+    set(oneValueArgs NAME MODULE_ID EXPORT_MAP OUTPUT_ROOT HOOKER_CLASS USE_DOBBY USE_LSPLANT)
     set(multiValueArgs SOURCES INCLUDE_DIRS COMPILE_DEFS LINK_LIBS)
     cmake_parse_arguments(ZM "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
 
@@ -29,6 +29,16 @@ function(add_zygisk_module)
         set(ZM_HOOKER_CLASS "${ZM_MODULE_ID}.Hooker")
     endif()
 
+    # Defaults: keep backward compatibility (all modules used to link these).
+    set(_use_dobby TRUE)
+    set(_use_lsplant TRUE)
+    if(NOT "${ZM_USE_DOBBY}" STREQUAL "")
+        set(_use_dobby ${ZM_USE_DOBBY})
+    endif()
+    if(NOT "${ZM_USE_LSPLANT}" STREQUAL "")
+        set(_use_lsplant ${ZM_USE_LSPLANT})
+    endif()
+
     add_library(${ZM_NAME} SHARED ${ZM_SOURCES})
 
     target_compile_options(${ZM_NAME} PRIVATE
@@ -47,16 +57,30 @@ function(add_zygisk_module)
     target_include_directories(${ZM_NAME} PRIVATE
         ${ZM_INCLUDE_DIRS}
         ${CMAKE_SOURCE_DIR}/external/zygisk
-        ${DOBBY_DIR}/include
-        ${LSPLANT_JNI_DIR}/include
     )
 
+    if(_use_dobby)
+        target_include_directories(${ZM_NAME} PRIVATE
+            ${DOBBY_DIR}/include
+        )
+    endif()
+    if(_use_lsplant)
+        target_include_directories(${ZM_NAME} PRIVATE
+            ${LSPLANT_JNI_DIR}/include
+        )
+    endif()
+
     target_link_libraries(${ZM_NAME} PRIVATE
-        dobby_static
-        lsplant_static
         log
         ${ZM_LINK_LIBS}
     )
+
+    if(_use_dobby)
+        target_link_libraries(${ZM_NAME} PRIVATE dobby_static)
+    endif()
+    if(_use_lsplant)
+        target_link_libraries(${ZM_NAME} PRIVATE lsplant_static)
+    endif()
 
     if(ZM_EXPORT_MAP)
         target_link_options(${ZM_NAME} PRIVATE

@@ -78,6 +78,25 @@ else()
             "Please run: ./setup.sh")
 endif()
 
+# --- frida-gum (Frida GUM DevKit, static lib) ---
+set(FRIDA_GUM_DIR ${CMAKE_CURRENT_SOURCE_DIR}/external/frida-gum)
+set(FRIDA_GUM_HEADER ${FRIDA_GUM_DIR}/include/frida-gum.h)
+set(FRIDA_GUM_LIB ${FRIDA_GUM_DIR}/lib/${ANDROID_ABI}/libfrida-gum.a)
+if(EXISTS ${FRIDA_GUM_HEADER} AND EXISTS ${FRIDA_GUM_LIB})
+    add_library(frida_gum_static STATIC IMPORTED GLOBAL)
+    set_target_properties(frida_gum_static PROPERTIES
+        IMPORTED_LOCATION "${FRIDA_GUM_LIB}"
+        INTERFACE_INCLUDE_DIRECTORIES "${FRIDA_GUM_DIR}/include"
+    )
+    message(STATUS "frida-gum: Found devkit at ${FRIDA_GUM_DIR} (${ANDROID_ABI})")
+else()
+    message(FATAL_ERROR "frida-gum devkit not found.\n"
+            "Expected:\n"
+            "  - ${FRIDA_GUM_HEADER}\n"
+            "  - ${FRIDA_GUM_LIB}\n"
+            "Please run: ./setup.sh")
+endif()
+
 # ==================== Zygisk 模块库 ====================
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/ZygiskModule.cmake)

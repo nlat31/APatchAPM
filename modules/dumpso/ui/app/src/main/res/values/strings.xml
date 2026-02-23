@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">DumpSo Settings</string>
+    <string name="tab_apps">Apps</string>
+    <string name="tab_options">Options</string>
+    <string name="apply">Apply</string>
+    <string name="show_system_apps">Show system apps</string>
+    <string name="enable_dump_hook">Enable dump hook (do_dlopen)</string>
+    <string name="watch_loaded_libraries">Watch loaded libraries (logcat)</string>
+    <string name="on_load">Dump on loading (before original do_dlopen)</string>
+    <string name="rebuild_fix_so">Rebuild ELF and output .fix.so</string>
+    <string name="delay_seconds">Delay (seconds, 0 = no delay)</string>
+    <string name="so_name">Target so name (substring match)</string>
+    <string name="regex">Target regex (POSIX ERE, full match)</string>
+    <string name="regex_note">If regex is provided, so_name will be ignored.</string>
+    <string name="dump_mode">Dump mode</string>
+    <string name="dump_mode_hook">Hook on load (do_dlopen)</string>
+    <string name="dump_mode_enumerate">Enumerate after delay (no hook)</string>
+    <string name="enum_delay_seconds">Enumerate delay (seconds)</string>
+    <string name="root_required">Root permission is required to read/write /data/adb.</string>
+</resources>
+

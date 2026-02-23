@@ -7,6 +7,7 @@ set -euo pipefail
 # 从 GitHub 拉取最新版本的:
 #   - Dobby       (Native inline hook 框架)
 #   - lsplant     (ART Java hook 框架)
+#   - frida-gum   (Frida GUM DevKit, static lib)
 #   - zygisk.hpp  (Zygisk Module API 头文件)
 # ================================================================
 
@@ -17,6 +18,8 @@ EXTERNAL_DIR="${SCRIPT_DIR}/external"
 DOBBY_REPO="https://github.com/jmpews/Dobby.git"
 LSPLANT_REPO="https://github.com/LSPosed/LSPlant.git"
 ZYGISK_HPP_URL="https://raw.githubusercontent.com/topjohnwu/zygisk-module-sample/master/module/jni/zygisk.hpp"
+FRIDA_GUM_VERSION="17.7.3"
+FRIDA_MIRROR_BASE="https://sourceforge.net/projects/frida.mirror/files"
 
 # 颜色
 RED='\033[0;31m'
@@ -38,6 +41,7 @@ check_tool() {
 }
 
 check_tool git
+check_tool tar
 
 # 检查下载工具
 DOWNLOAD_CMD=""
@@ -59,7 +63,7 @@ mkdir -p "${EXTERNAL_DIR}"
 
 # ==================== 1. Dobby ====================
 DOBBY_DIR="${EXTERNAL_DIR}/dobby"
-step "[1/3] Dobby (Native Hook Framework)"
+step "[1/4] Dobby (Native Hook Framework)"
 
 if [ -d "${DOBBY_DIR}/.git" ]; then
     info "Dobby already exists, pulling latest..."
@@ -250,7 +254,7 @@ patch_dobby_android
 
 # ==================== 2. lsplant ====================
 LSPLANT_DIR="${EXTERNAL_DIR}/lsplant"
-step "[2/3] lsplant (ART Java Hook Framework)"
+step "[2/4] lsplant (ART Java Hook Framework)"
 
 if [ -d "${LSPLANT_DIR}/.git" ]; then
     info "lsplant already exists, pulling latest..."
@@ -292,10 +296,82 @@ else
     error "lsplant clone failed - CMakeLists.txt not found at ${LSPLANT_JNI}"
 fi
 
-# ==================== 3. zygisk.hpp ====================
+# ==================== 3. frida-gum (devkit) ====================
+FRIDA_DIR="${EXTERNAL_DIR}/frida-gum"
+FRIDA_INCLUDE_DIR="${FRIDA_DIR}/include"
+FRIDA_LIB_DIR="${FRIDA_DIR}/lib"
+step "[3/4] frida-gum (DevKit ${FRIDA_GUM_VERSION})"
+
+mkdir -p "${FRIDA_INCLUDE_DIR}" "${FRIDA_LIB_DIR}"
+
+download_file() {
+    local url="$1"
+    local out="$2"
+    if [ "${DOWNLOAD_CMD}" = "curl" ]; then
+        curl -fsSL "${url}" -o "${out}"
+    else
+        wget -q "${url}" -O "${out}"
+    fi
+}
+
+extract_devkit_one() {
+    local abi="$1"
+    local frida_arch="$2"
+
+    local url_github="https://github.com/frida/frida/releases/download/${FRIDA_GUM_VERSION}/frida-gum-devkit-${FRIDA_GUM_VERSION}-${frida_arch}.tar.xz"
+    local url_sf="${FRIDA_MIRROR_BASE}/${FRIDA_GUM_VERSION}/frida-gum-devkit-${FRIDA_GUM_VERSION}-${frida_arch}.tar.xz/download"
+    local tmpbase
+    tmpbase="$(mktemp -d)"
+    local archive="${tmpbase}/frida-gum-devkit.tar.xz"
+
+    info "Downloading ${abi} devkit..."
+    if ! download_file "${url_github}" "${archive}"; then
+        warn "GitHub download failed; trying SourceForge mirror..."
+        if ! download_file "${url_sf}" "${archive}"; then
+            rm -rf "${tmpbase}"
+            error "Failed to download frida-gum devkit for ${abi}\n  ${url_github}\n  ${url_sf}"
+        fi
+    fi
+
+    tar -xJf "${archive}" -C "${tmpbase}"
+
+    local hdr=""
+    if [ -f "${tmpbase}/frida-gum.h" ]; then
+        hdr="${tmpbase}/frida-gum.h"
+    elif [ -f "${tmpbase}/include/frida-gum.h" ]; then
+        hdr="${tmpbase}/include/frida-gum.h"
+    fi
+
+    local lib=""
+    if [ -f "${tmpbase}/libfrida-gum.a" ]; then
+        lib="${tmpbase}/libfrida-gum.a"
+    elif [ -f "${tmpbase}/lib/libfrida-gum.a" ]; then
+        lib="${tmpbase}/lib/libfrida-gum.a"
+    fi
+
+    if [ -z "${hdr}" ] || [ -z "${lib}" ]; then
+        rm -rf "${tmpbase}"
+        error "Unexpected frida-gum devkit layout for ${abi} (${frida_arch})"
+    fi
+
+    # Header should be identical across ABIs; overwrite is fine.
+    cp -f "${hdr}" "${FRIDA_INCLUDE_DIR}/frida-gum.h"
+    mkdir -p "${FRIDA_LIB_DIR}/${abi}"
+    cp -f "${lib}" "${FRIDA_LIB_DIR}/${abi}/libfrida-gum.a"
+
+    rm -rf "${tmpbase}"
+    info "frida-gum OK: ${abi}"
+}
+
+extract_devkit_one "arm64-v8a" "android-arm64"
+extract_devkit_one "armeabi-v7a" "android-arm"
+extract_devkit_one "x86" "android-x86"
+extract_devkit_one "x86_64" "android-x86_64"
+
+# ==================== 4. zygisk.hpp ====================
 ZYGISK_DIR="${EXTERNAL_DIR}/zygisk"
 ZYGISK_HPP="${ZYGISK_DIR}/zygisk.hpp"
-step "[3/3] zygisk.hpp (Zygisk Module API Header)"
+step "[4/4] zygisk.hpp (Zygisk Module API Header)"
 
 mkdir -p "${ZYGISK_DIR}"
 
@@ -331,6 +407,7 @@ echo -e "${GREEN}===============================================================
 echo ""
 echo "  Dobby:       ${DOBBY_DIR}"
 echo "  lsplant:     ${LSPLANT_DIR}"
+echo "  frida-gum:   ${FRIDA_DIR}"
 echo "  zygisk.hpp:  ${ZYGISK_HPP}"
 echo ""
 
@@ -338,6 +415,7 @@ echo ""
 echo "  Versions:"
 cd "${DOBBY_DIR}" && echo "    Dobby:   $(git log -1 --format='%h %s' 2>/dev/null || echo 'unknown')" && cd "${SCRIPT_DIR}"
 cd "${LSPLANT_DIR}" && echo "    lsplant: $(git log -1 --format='%h %s' 2>/dev/null || echo 'unknown')" && cd "${SCRIPT_DIR}"
+echo "    frida-gum: ${FRIDA_GUM_VERSION}"
 echo ""
 echo -e "  Run ${CYAN}./build.sh${NC} to build the Zygisk module."
 echo ""

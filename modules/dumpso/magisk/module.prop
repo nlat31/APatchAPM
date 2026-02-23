@@ -1,0 +1,7 @@
+id=dumpso
+name=DumpSo
+version=v1.0.0
+versionCode=1
+author=developer
+description=Zygisk module to dump in-memory shared libraries on load
+
