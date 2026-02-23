@@ -4,11 +4,11 @@ plugins {
 }
 
 android {
-    namespace 'com.example.sample.settings'
+    namespace 'com.apm.dumpso'
     compileSdk 34
 
     defaultConfig {
-        applicationId 'com.example.sample.settings'
+        applicationId 'com.apm.dumpso'
         minSdk 23
         targetSdk 34
         versionCode 1

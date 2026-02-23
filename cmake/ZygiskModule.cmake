@@ -89,11 +89,21 @@ function(add_zygisk_module)
     endif()
 
     # Build output staging: out/<module_id>/module/zygisk/<abi>.so
+    #
+    # Important: build.sh wipes out/ before build. If we only stage via POST_BUILD,
+    # an up-to-date module target won't re-link and the POST_BUILD step won't run,
+    # leaving no out/<id>/module/zygisk/<abi>.so for packaging.
+    #
+    # Use an ALWAYS-RUN custom target (ALL) that depends on the module library, so
+    # staging happens every build invocation even when the binary is up-to-date.
     set(_out_dir "${ZM_OUTPUT_ROOT}/${ZM_MODULE_ID}/module/zygisk")
-    add_custom_command(TARGET ${ZM_NAME} POST_BUILD
+    set(_stage_target "${ZM_NAME}_stage")
+    add_custom_target(${_stage_target} ALL
         COMMAND ${CMAKE_COMMAND} -E make_directory "${_out_dir}"
         COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:${ZM_NAME}>" "${_out_dir}/${ANDROID_ABI}.so"
         COMMENT "Staging ${ZM_MODULE_ID} (${ANDROID_ABI}) -> ${_out_dir}/${ANDROID_ABI}.so"
+        VERBATIM
     )
+    add_dependencies(${_stage_target} ${ZM_NAME})
 endfunction()
 

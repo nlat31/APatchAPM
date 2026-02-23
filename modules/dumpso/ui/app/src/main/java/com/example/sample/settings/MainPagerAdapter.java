@@ -1,4 +1,4 @@
-package com.example.sample.settings;
+package com.apm.dumpso;
 
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;

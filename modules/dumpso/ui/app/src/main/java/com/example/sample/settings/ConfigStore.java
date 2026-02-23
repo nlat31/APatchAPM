@@ -1,4 +1,4 @@
-package com.example.sample.settings;
+package com.apm.dumpso;
 
 import android.util.Base64;
 
@@ -19,36 +19,27 @@ public final class ConfigStore {
     private static final String CONFIG_PATH = "/data/adb/modules/" + MOD_ID + "/config.json";
 
     public static final class Config {
-        public final boolean hookNative;
         public final boolean watch;
-        public final boolean onLoad;
         public final boolean fix;
         public final long delayUs;
         public final String dumpMode;
         public final long enumDelayUs;
         public final String soName;
-        public final String regex;
         public final Set<String> packages;
 
-        public Config(boolean hookNative,
-                      boolean watch,
-                      boolean onLoad,
+        public Config(boolean watch,
                       boolean fix,
                       long delayUs,
                       String dumpMode,
                       long enumDelayUs,
                       String soName,
-                      String regex,
                       Set<String> packages) {
-            this.hookNative = hookNative;
             this.watch = watch;
-            this.onLoad = onLoad;
             this.fix = fix;
             this.delayUs = delayUs;
             this.dumpMode = dumpMode != null ? dumpMode : "hook";
             this.enumDelayUs = enumDelayUs;
             this.soName = soName != null ? soName : "";
-            this.regex = regex != null ? regex : "";
             this.packages = packages != null ? packages : new HashSet<String>();
         }
     }
@@ -70,15 +61,12 @@ public final class ConfigStore {
                 }
             }
             return new Config(
-                obj.optBoolean("hook_native", false),
                 obj.optBoolean("watch", false),
-                obj.optBoolean("on_load", false),
                 obj.optBoolean("fix", true),
                 obj.optLong("delay_us", obj.optLong("delay", 0L)),
                 obj.optString("dump_mode", "hook"),
                 obj.optLong("enum_delay_us", obj.optLong("enum_delay", 0L)),
                 obj.optString("so_name", ""),
-                obj.optString("regex", ""),
                 pkgs
             );
         } catch (Throwable t) {
@@ -90,15 +78,12 @@ public final class ConfigStore {
         try {
             JSONObject obj = new JSONObject();
             obj.put("version", 1);
-            obj.put("hook_native", cfg != null && cfg.hookNative);
             obj.put("watch", cfg != null && cfg.watch);
-            obj.put("on_load", cfg != null && cfg.onLoad);
             obj.put("fix", cfg != null && cfg.fix);
             obj.put("delay_us", cfg != null ? Math.max(0L, cfg.delayUs) : 0L);
             obj.put("dump_mode", cfg != null && cfg.dumpMode != null ? cfg.dumpMode : "hook");
             obj.put("enum_delay_us", cfg != null ? Math.max(0L, cfg.enumDelayUs) : 0L);
             obj.put("so_name", cfg != null && cfg.soName != null ? cfg.soName : "");
-            obj.put("regex", cfg != null && cfg.regex != null ? cfg.regex : "");
 
             List<String> pkgs = new ArrayList<>();
             if (cfg != null && cfg.packages != null) pkgs.addAll(cfg.packages);

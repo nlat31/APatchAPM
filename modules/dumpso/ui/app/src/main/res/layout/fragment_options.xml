@@ -2,7 +2,8 @@
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
-    android:layout_height="match_parent">
+    android:layout_height="match_parent"
+    android:background="?attr/colorSurface">
 
     <LinearLayout
         android:layout_width="match_parent"
@@ -10,113 +11,179 @@
         android:orientation="vertical"
         android:padding="12dp">
 
-        <com.google.android.material.checkbox.MaterialCheckBox
-            android:id="@+id/checkEnableHook"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="@string/enable_dump_hook" />
-
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="@string/dump_mode"
-            android:textAppearance="?attr/textAppearanceTitleSmall"
-            android:layout_marginTop="12dp" />
+            android:text="@string/options_tip"
+            android:textAppearance="?attr/textAppearanceBodyMedium"
+            android:textColor="?attr/colorOnSurface"
+            android:layout_marginBottom="12dp" />
 
-        <RadioGroup
-            android:id="@+id/radioDumpMode"
+        <com.google.android.material.card.MaterialCardView
             android:layout_width="match_parent"
-            android:layout_height="wrap_content">
+            android:layout_height="wrap_content"
+            app:cardUseCompatPadding="true"
+            app:cardElevation="1dp"
+            app:strokeWidth="1dp"
+            app:strokeColor="?attr/colorOutline">
 
-            <RadioButton
-                android:id="@+id/radioModeHook"
+            <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="@string/dump_mode_hook" />
+                android:orientation="vertical"
+                android:padding="12dp">
 
-            <RadioButton
-                android:id="@+id/radioModeEnumerate"
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/dump_mode"
+                    android:textAppearance="?attr/textAppearanceTitleMedium"
+                    android:textColor="?attr/colorOnSurface" />
+
+                <RadioGroup
+                    android:id="@+id/radioDumpMode"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp">
+
+                    <RadioButton
+                        android:id="@+id/radioModeHook"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="@string/dump_mode_hook"
+                        android:textColor="?attr/colorOnSurface" />
+
+                    <RadioButton
+                        android:id="@+id/radioModeEnumerate"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="@string/dump_mode_enumerate"
+                        android:textColor="?attr/colorOnSurface" />
+                </RadioGroup>
+
+                <com.google.android.material.checkbox.MaterialCheckBox
+                    android:id="@+id/checkFix"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/rebuild_fix_so"
+                    android:textColor="?attr/colorOnSurface" />
+
+                <com.google.android.material.textfield.TextInputLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:hint="@string/so_name"
+                    android:layout_marginTop="12dp">
+
+                    <com.google.android.material.textfield.TextInputEditText
+                        android:id="@+id/editSoName"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:inputType="text" />
+                </com.google.android.material.textfield.TextInputLayout>
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <com.google.android.material.card.MaterialCardView
+            android:id="@+id/cardHookMode"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            app:cardUseCompatPadding="true"
+            app:cardElevation="1dp"
+            app:strokeWidth="1dp"
+            app:strokeColor="?attr/colorOutline">
+
+            <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="@string/dump_mode_enumerate" />
-        </RadioGroup>
+                android:orientation="vertical"
+                android:padding="12dp">
 
-        <com.google.android.material.checkbox.MaterialCheckBox
-            android:id="@+id/checkWatch"
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/hook_mode_settings"
+                    android:textAppearance="?attr/textAppearanceTitleMedium"
+                    android:textColor="?attr/colorOnSurface" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="@string/hook_mode_note"
+                    android:textAppearance="?attr/textAppearanceBodyMedium"
+                    android:textColor="?attr/colorOnSurface" />
+
+                <com.google.android.material.checkbox.MaterialCheckBox
+                    android:id="@+id/checkWatch"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/watch_loaded_libraries"
+                    android:textColor="?attr/colorOnSurface" />
+
+                <com.google.android.material.textfield.TextInputLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:hint="@string/delay_seconds"
+                    android:layout_marginTop="12dp">
+
+                    <com.google.android.material.textfield.TextInputEditText
+                        android:id="@+id/editDelaySeconds"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:inputType="number" />
+                </com.google.android.material.textfield.TextInputLayout>
+
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <com.google.android.material.card.MaterialCardView
+            android:id="@+id/cardEnumMode"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="@string/watch_loaded_libraries" />
+            android:layout_marginTop="12dp"
+            app:cardUseCompatPadding="true"
+            app:cardElevation="1dp"
+            app:strokeWidth="1dp"
+            app:strokeColor="?attr/colorOutline">
 
-        <com.google.android.material.checkbox.MaterialCheckBox
-            android:id="@+id/checkOnLoad"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="@string/on_load" />
-
-        <com.google.android.material.checkbox.MaterialCheckBox
-            android:id="@+id/checkFix"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="@string/rebuild_fix_so" />
-
-        <com.google.android.material.textfield.TextInputLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:hint="@string/delay_seconds"
-            android:layout_marginTop="12dp">
-
-            <com.google.android.material.textfield.TextInputEditText
-                android:id="@+id/editDelaySeconds"
+            <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:inputType="number" />
-        </com.google.android.material.textfield.TextInputLayout>
+                android:orientation="vertical"
+                android:padding="12dp">
 
-        <com.google.android.material.textfield.TextInputLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:hint="@string/enum_delay_seconds"
-            android:layout_marginTop="12dp">
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/enum_mode_settings"
+                    android:textAppearance="?attr/textAppearanceTitleMedium"
+                    android:textColor="?attr/colorOnSurface" />
 
-            <com.google.android.material.textfield.TextInputEditText
-                android:id="@+id/editEnumDelaySeconds"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:inputType="number" />
-        </com.google.android.material.textfield.TextInputLayout>
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="@string/enum_mode_note"
+                    android:textAppearance="?attr/textAppearanceBodyMedium"
+                    android:textColor="?attr/colorOnSurface" />
 
-        <com.google.android.material.textfield.TextInputLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:hint="@string/so_name"
-            android:layout_marginTop="12dp">
+                <com.google.android.material.textfield.TextInputLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:hint="@string/enum_delay_seconds"
+                    android:layout_marginTop="12dp">
 
-            <com.google.android.material.textfield.TextInputEditText
-                android:id="@+id/editSoName"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:inputType="text" />
-        </com.google.android.material.textfield.TextInputLayout>
-
-        <com.google.android.material.textfield.TextInputLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:hint="@string/regex"
-            android:layout_marginTop="12dp">
-
-            <com.google.android.material.textfield.TextInputEditText
-                android:id="@+id/editRegex"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:inputType="text" />
-        </com.google.android.material.textfield.TextInputLayout>
-
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="@string/regex_note"
-            android:textAppearance="?attr/textAppearanceBodySmall"
-            android:layout_marginTop="8dp" />
+                    <com.google.android.material.textfield.TextInputEditText
+                        android:id="@+id/editEnumDelaySeconds"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:inputType="number" />
+                </com.google.android.material.textfield.TextInputLayout>
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
 
     </LinearLayout>
 </ScrollView>

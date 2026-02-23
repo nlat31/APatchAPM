@@ -5,11 +5,13 @@
 
 namespace dumpso {
 
-// Enumerate currently loaded modules after a delay and dump all ".so" modules.
+// Enumerate currently loaded modules after a delay and dump matching modules.
+// If `so_name` is empty, dump all enumerated modules.
 // This mode must not install any hooks.
 void enumerate_and_dump_after_delay(const std::string& package_name,
                                     uint32_t delay_us,
-                                    bool fix);
+                                    bool fix,
+                                    const std::string& so_name);
 
 } // namespace dumpso
 

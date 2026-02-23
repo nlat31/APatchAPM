@@ -1,4 +1,4 @@
-package com.example.sample.settings;
+package com.apm.dumpso;
 
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;

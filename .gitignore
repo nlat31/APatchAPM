@@ -95,4 +95,5 @@ modules/*/magisk/classes.dex
 external/dobby/
 external/lsplant/
 external/zygisk/
+external/frida-gum/
 

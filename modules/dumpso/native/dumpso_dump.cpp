@@ -85,7 +85,7 @@ void dump_module(const std::string& package_name,
                  uintptr_t module_base,
                  size_t module_size,
                  bool fix) {
-    if (!so_path || module_base == 0 || module_size == 0) return;
+    if (module_base == 0 || module_size == 0) return;
 
     std::string output_dir = "/data/data/" + package_name + "/dumpso/";
     if (!ensure_dir(output_dir, 0700)) {
@@ -93,11 +93,29 @@ void dump_module(const std::string& package_name,
         return;
     }
 
-    std::stringstream base_hex;
-    base_hex << "0x" << std::hex << module_base;
+    const uintptr_t module_end = module_base + module_size;
 
-    std::string module_name = std::string(so_path).substr(std::string(so_path).find_last_of('/') + 1);
-    std::string dump_path = output_dir + module_name + ".dump[" + base_hex.str() + "].so";
+    std::stringstream range_hex;
+    range_hex << "0x" << std::hex << module_base << "-0x" << std::hex << module_end;
+    const std::string range_tag = range_hex.str();
+
+    std::string module_name;
+    if (so_path && so_path[0] != '\0') {
+        std::string s(so_path);
+        size_t slash = s.find_last_of('/');
+        std::string base = (slash == std::string::npos) ? s : s.substr(slash + 1);
+        module_name = !base.empty() ? std::move(base) : std::move(s);
+    }
+    if (module_name.empty()) {
+        module_name = range_tag;
+    }
+
+    std::string dump_path;
+    if (module_name == range_tag) {
+        dump_path = output_dir + module_name + ".dump.so";
+    } else {
+        dump_path = output_dir + module_name + ".dump[" + range_tag + "].so";
+    }
 
     gum_ensure_code_readable(reinterpret_cast<void*>(module_base), module_size);
 

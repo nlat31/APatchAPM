@@ -22,15 +22,12 @@
 namespace {
 
 struct DumpSoConfig {
-    bool hook_enabled = false;
     bool watch = false;
-    bool on_load = false;
     bool fix = true;
     uint32_t delay_us = 0;
     uint32_t enum_delay_us = 0;
     std::string dump_mode;
     std::string so_name;
-    std::string regex;
     std::vector<std::string> packages;
     time_t mtime = 0;
     bool loaded = false;
@@ -201,21 +198,15 @@ static const DumpSoConfig &load_config_cached() {
     next.mtime = st.st_mtime;
     next.packages = parse_string_array_by_key(json, "packages");
 
-    // Keep compatibility with the sample UI:
-    // - hook_native: enable dumpso hook workflow
-    next.hook_enabled = parse_bool_by_key(json, "hook_native", false);
-
     // Optional dumpso params (can be edited manually for now)
     next.dump_mode = parse_string_by_key(json, "dump_mode", "hook");
     next.watch = parse_bool_by_key(json, "watch", false);
-    next.on_load = parse_bool_by_key(json, "on_load", false);
     next.fix = parse_bool_by_key(json, "fix", true);
     next.delay_us = parse_uint_by_key(json, "delay_us", 0);
     if (next.delay_us == 0) next.delay_us = parse_uint_by_key(json, "delay", 0);
     next.enum_delay_us = parse_uint_by_key(json, "enum_delay_us", 0);
     if (next.enum_delay_us == 0) next.enum_delay_us = parse_uint_by_key(json, "enum_delay", 0);
     next.so_name = parse_string_by_key(json, "so_name", "");
-    next.regex = parse_string_by_key(json, "regex", "");
 
     cfg = std::move(next);
     return cfg;
@@ -245,10 +236,7 @@ public:
         }
 
         base_pkg_ = base_package_name(proc);
-        hook_enabled_ = cfg.hook_enabled;
         cfg_ = cfg;
-
-        if (!hook_enabled_) return;
 
         // Two independent dump modes:
         // - hook: install do_dlopen hook (delayed dump supported via delay_us)
@@ -256,20 +244,18 @@ public:
         if (cfg_.dump_mode == "hook" || cfg_.dump_mode.empty()) {
             dumpso::HookOptions opts{
                 .watch = cfg_.watch,
-                .on_load = cfg_.on_load,
                 .fix = cfg_.fix,
                 .delay_us = cfg_.delay_us,
                 .so_name = cfg_.so_name,
-                .regex = cfg_.regex,
             };
             dumpso::install_dlopen_hook(base_pkg_, opts);
         }
     }
 
     void postAppSpecialize(const zygisk::AppSpecializeArgs * /*args*/) override {
-        if (!should_inject_ || !hook_enabled_) return;
+        if (!should_inject_) return;
         if (cfg_.dump_mode == "enumerate") {
-            dumpso::enumerate_and_dump_after_delay(base_pkg_, cfg_.enum_delay_us, cfg_.fix);
+            dumpso::enumerate_and_dump_after_delay(base_pkg_, cfg_.enum_delay_us, cfg_.fix, cfg_.so_name);
         }
     }
 
@@ -281,7 +267,6 @@ private:
     zygisk::Api *api_ = nullptr;
     JNIEnv      *env_ = nullptr;
     bool         should_inject_ = false;
-    bool         hook_enabled_ = false;
     std::string  base_pkg_;
     DumpSoConfig cfg_{};
 };

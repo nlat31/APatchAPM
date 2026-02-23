@@ -1,4 +1,4 @@
-package com.example.sample.settings;
+package com.apm.dumpso;
 
 import android.os.Bundle;
 import android.widget.Toast;
@@ -24,12 +24,30 @@ public class MainActivity extends AppCompatActivity {
 
         ViewPager2 pager = findViewById(R.id.pager);
         TabLayout tabs = findViewById(R.id.tabs);
+        ExtendedFloatingActionButton btnClear = findViewById(R.id.btnClear);
         ExtendedFloatingActionButton btnApply = findViewById(R.id.btnApply);
 
         pager.setAdapter(new MainPagerAdapter(this));
         new TabLayoutMediator(tabs, pager, (tab, pos) -> {
             tab.setText(getString(pos == 0 ? R.string.tab_apps : R.string.tab_options));
         }).attach();
+
+        Runnable updateClearVisibility = () -> btnClear.setVisibility(pager.getCurrentItem() == 0 ? android.view.View.VISIBLE : android.view.View.GONE);
+        updateClearVisibility.run();
+        pager.registerOnPageChangeCallback(new ViewPager2.OnPageChangeCallback() {
+            @Override public void onPageSelected(int position) {
+                updateClearVisibility.run();
+            }
+        });
+
+        btnClear.setOnClickListener(v -> {
+            for (androidx.fragment.app.Fragment f : getSupportFragmentManager().getFragments()) {
+                if (f instanceof AppsFragment) {
+                    ((AppsFragment) f).clearSelection();
+                    break;
+                }
+            }
+        });
 
         // Request root early (shows Magisk prompt)
         if (!RootShell.ensureRoot()) {
@@ -50,15 +68,12 @@ public class MainActivity extends AppCompatActivity {
             }
 
             ConfigStore.Config cfg = new ConfigStore.Config(
-                vm.hookNative,
                 vm.watch,
-                vm.onLoad,
                 vm.fix,
                 vm.delayUs,
                 vm.dumpMode,
                 vm.enumDelayUs,
                 vm.soName,
-                vm.regex,
                 new java.util.LinkedHashSet<>(vm.selectedPackages)
             );
             RootShell.Result r = ConfigStore.writeConfig(cfg);

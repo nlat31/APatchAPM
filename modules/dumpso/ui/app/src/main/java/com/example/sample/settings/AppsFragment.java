@@ -1,4 +1,4 @@
-package com.example.sample.settings;
+package com.apm.dumpso;
 
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
@@ -26,6 +26,7 @@ public class AppsFragment extends Fragment {
     }
 
     private SharedViewModel vm;
+    private AppsAdapter adapter;
 
     @Override
     public void onViewCreated(@NonNull View view, @Nullable Bundle savedInstanceState) {
@@ -35,7 +36,7 @@ public class AppsFragment extends Fragment {
         RecyclerView recycler = view.findViewById(R.id.recyclerApps);
 
         recycler.setLayoutManager(new LinearLayoutManager(requireContext()));
-        AppsAdapter adapter = new AppsAdapter(requireContext().getPackageManager(), vm.selectedPackages);
+        adapter = new AppsAdapter(requireContext().getPackageManager(), vm.selectedPackages);
         recycler.setAdapter(adapter);
 
         Runnable loadApps = () -> {
@@ -70,6 +71,11 @@ public class AppsFragment extends Fragment {
         });
 
         loadApps.run();
+    }
+
+    public void clearSelection() {
+        if (vm != null) vm.selectedPackages.clear();
+        if (adapter != null) adapter.notifyDataSetChanged();
     }
 }
 

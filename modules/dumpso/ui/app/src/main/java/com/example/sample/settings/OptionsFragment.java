@@ -1,4 +1,4 @@
-package com.example.sample.settings;
+package com.apm.dumpso;
 
 import android.os.Bundle;
 import android.text.Editable;
@@ -11,6 +11,7 @@ import androidx.fragment.app.Fragment;
 import androidx.lifecycle.ViewModelProvider;
 
 import com.google.android.material.checkbox.MaterialCheckBox;
+import com.google.android.material.card.MaterialCardView;
 import com.google.android.material.textfield.TextInputEditText;
 import android.widget.RadioButton;
 import android.widget.RadioGroup;
@@ -26,39 +27,44 @@ public class OptionsFragment extends Fragment {
     public void onViewCreated(@NonNull View view, @Nullable Bundle savedInstanceState) {
         vm = new ViewModelProvider(requireActivity()).get(SharedViewModel.class);
 
-        MaterialCheckBox cEnable = view.findViewById(R.id.checkEnableHook);
         MaterialCheckBox cWatch = view.findViewById(R.id.checkWatch);
-        MaterialCheckBox cOnLoad = view.findViewById(R.id.checkOnLoad);
         MaterialCheckBox cFix = view.findViewById(R.id.checkFix);
 
         TextInputEditText editDelaySec = view.findViewById(R.id.editDelaySeconds);
         TextInputEditText editEnumDelaySec = view.findViewById(R.id.editEnumDelaySeconds);
         TextInputEditText editSoName = view.findViewById(R.id.editSoName);
-        TextInputEditText editRegex = view.findViewById(R.id.editRegex);
 
         RadioGroup groupMode = view.findViewById(R.id.radioDumpMode);
         RadioButton radioHook = view.findViewById(R.id.radioModeHook);
         RadioButton radioEnum = view.findViewById(R.id.radioModeEnumerate);
 
-        cEnable.setChecked(vm.hookNative);
+        MaterialCardView cardHook = view.findViewById(R.id.cardHookMode);
+        MaterialCardView cardEnum = view.findViewById(R.id.cardEnumMode);
+
         cWatch.setChecked(vm.watch);
-        cOnLoad.setChecked(vm.onLoad);
         cFix.setChecked(vm.fix);
 
-        cEnable.setOnCheckedChangeListener((buttonView, isChecked) -> vm.hookNative = isChecked);
         cWatch.setOnCheckedChangeListener((buttonView, isChecked) -> vm.watch = isChecked);
-        cOnLoad.setOnCheckedChangeListener((buttonView, isChecked) -> vm.onLoad = isChecked);
         cFix.setOnCheckedChangeListener((buttonView, isChecked) -> vm.fix = isChecked);
 
         boolean isEnum = "enumerate".equals(vm.dumpMode);
         radioEnum.setChecked(isEnum);
         radioHook.setChecked(!isEnum);
+
+        Runnable updateModeUi = () -> {
+            boolean e = "enumerate".equals(vm.dumpMode);
+            cardHook.setVisibility(e ? View.GONE : View.VISIBLE);
+            cardEnum.setVisibility(e ? View.VISIBLE : View.GONE);
+        };
+        updateModeUi.run();
+
         groupMode.setOnCheckedChangeListener((group, checkedId) -> {
             if (checkedId == R.id.radioModeEnumerate) {
                 vm.dumpMode = "enumerate";
             } else {
                 vm.dumpMode = "hook";
             }
+            updateModeUi.run();
         });
 
         long sec = vm.delayUs > 0 ? (vm.delayUs / 1_000_000L) : 0L;
@@ -66,7 +72,6 @@ public class OptionsFragment extends Fragment {
         long enumSec = vm.enumDelayUs > 0 ? (vm.enumDelayUs / 1_000_000L) : 0L;
         editEnumDelaySec.setText(String.valueOf(enumSec));
         editSoName.setText(vm.soName != null ? vm.soName : "");
-        editRegex.setText(vm.regex != null ? vm.regex : "");
 
         editDelaySec.addTextChangedListener(new TextWatcher() {
             @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
@@ -101,14 +106,6 @@ public class OptionsFragment extends Fragment {
             @Override public void onTextChanged(CharSequence s, int start, int before, int count) {}
             @Override public void afterTextChanged(Editable s) {
                 vm.soName = s != null ? s.toString() : "";
-            }
-        });
-
-        editRegex.addTextChangedListener(new TextWatcher() {
-            @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
-            @Override public void onTextChanged(CharSequence s, int start, int before, int count) {}
-            @Override public void afterTextChanged(Editable s) {
-                vm.regex = s != null ? s.toString() : "";
             }
         });
     }
