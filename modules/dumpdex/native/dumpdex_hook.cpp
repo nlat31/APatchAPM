@@ -12,6 +12,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -35,7 +36,9 @@ constexpr const char* kLibDexfile = "libdexfile.so";
 constexpr const char* kOpenCommonSym =
     "_ZN3art13DexFileLoader10OpenCommonENSt3__110shared_ptrINS_16DexFileContainerEEEPKhmRKNS1_12basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEENS1_8optionalIjEEPKNS_10OatDexFileEbbPSC_PNS_22DexFileLoaderErrorCodeE";
 constexpr const char* kOpenCommonNeedle1 = "_ZN3art13DexFileLoader10OpenCommonE";
-constexpr const char* kOpenCommonNeedle2 = "DexFileLoader10OpenCommon";
+// Match the class name token exactly to avoid picking up ArtDexFileLoader::OpenCommon.
+// In Itanium C++ ABI mangling, `DexFileLoader` length is 13 => `13DexFileLoader`.
+constexpr const char* kOpenCommonNeedle2 = "13DexFileLoader10OpenCommon";
 // Extra constraint to pick the intended overload:
 // OpenCommon(std::shared_ptr<DexFileContainer>, ...)
 constexpr const char* kOpenCommonNeedleSharedPtrContainer = "NSt3__110shared_ptrINS_16DexFileContainerEEE";
@@ -77,6 +80,53 @@ static unsigned elf_st_type(unsigned char st_info) {
 #endif
 }
 
+static bool addr_in_range(ElfW(Addr) a, ElfW(Addr) start, ElfW(Addr) end) {
+    return a >= start && a < end;
+}
+
+// Some Android/linker builds expose DT_* pointers as:
+// - already-relocated absolute runtime addresses, OR
+// - ELF virtual addresses (relative to load bias / dlpi_addr).
+// Resolve robustly by checking whether the value falls into PT_LOAD ranges.
+static const void* normalize_dyn_ptr(const dl_phdr_info* info, ElfW(Addr) p) {
+    if (!info || !info->dlpi_phdr || p == 0) return nullptr;
+    const ElfW(Addr) base = static_cast<ElfW(Addr)>(info->dlpi_addr);
+
+    const ElfW(Phdr)* phdr = info->dlpi_phdr;
+    for (ElfW(Half) i = 0; i < info->dlpi_phnum; i++) {
+        if (phdr[i].p_type != PT_LOAD) continue;
+        const ElfW(Addr) vstart = static_cast<ElfW(Addr)>(phdr[i].p_vaddr);
+        const ElfW(Addr) vend = vstart + static_cast<ElfW(Addr)>(phdr[i].p_memsz);
+        const ElfW(Addr) rstart = base + vstart;
+        const ElfW(Addr) rend = rstart + static_cast<ElfW(Addr)>(phdr[i].p_memsz);
+
+        // Absolute runtime address.
+        if (addr_in_range(p, rstart, rend)) {
+            return reinterpret_cast<const void*>(p);
+        }
+        // Relative ELF virtual address.
+        if (addr_in_range(p, vstart, vend)) {
+            return reinterpret_cast<const void*>(base + p);
+        }
+    }
+
+    // Fallback: try treating as relative if it becomes a mapped address.
+    if (base != 0) {
+        const ElfW(Addr) cand = base + p;
+        for (ElfW(Half) i = 0; i < info->dlpi_phnum; i++) {
+            if (phdr[i].p_type != PT_LOAD) continue;
+            const ElfW(Addr) rstart = base + static_cast<ElfW(Addr)>(phdr[i].p_vaddr);
+            const ElfW(Addr) rend = rstart + static_cast<ElfW(Addr)>(phdr[i].p_memsz);
+            if (addr_in_range(cand, rstart, rend)) {
+                return reinterpret_cast<const void*>(cand);
+            }
+        }
+    }
+
+    // Last resort: keep original.
+    return reinterpret_cast<const void*>(p);
+}
+
 static bool is_opencommon_shared_ptr_container_overload(const char* sym_name) {
     if (!sym_name) return false;
     // Prefer strict mangled encoding when present, but allow more relaxed matching
@@ -84,6 +134,22 @@ static bool is_opencommon_shared_ptr_container_overload(const char* sym_name) {
     if (contains(sym_name, kOpenCommonNeedleSharedPtrContainer)) return true;
     return contains(sym_name, kNeedleSharedPtr) && contains(sym_name, kNeedleDexFileContainer);
 }
+
+enum class OpenCommonFlavor : uint8_t {
+    kUnknown = 0,
+    // OpenCommon(std::shared_ptr<DexFileContainer> container, const uint8_t* base, size_t size, ...)
+    kSharedPtrContainerFirst,
+    // OpenCommon(const uint8_t* base, size_t size, ...)
+    kBaseSizeFirst,
+};
+
+struct OpenCommonResolved {
+    void* addr = nullptr;
+    OpenCommonFlavor flavor = OpenCommonFlavor::kUnknown;
+    char name[512] = {0};
+    int matches = 0;
+    int shared_ptr_matches = 0;
+};
 
 static size_t symcount_from_gnu_hash(const void* gnu_hash) {
     if (!gnu_hash) return 0;
@@ -93,6 +159,10 @@ static size_t symcount_from_gnu_hash(const void* gnu_hash) {
     const uint32_t symoffset = *reinterpret_cast<const uint32_t*>(p + 4);
     const uint32_t bloom_size = *reinterpret_cast<const uint32_t*>(p + 8);
     // bloom_shift at +12 (unused here)
+
+    // Basic sanity to avoid wild reads on corrupted/incorrect pointers.
+    if (bloom_size == 0 || bloom_size > (1u << 20)) return 0;
+    if (nbuckets > (1u << 24)) return 0;
 
     if (nbuckets == 0) return symoffset;
 
@@ -154,19 +224,19 @@ static bool build_dynsym_view(const dl_phdr_info* info, DynSymView& out) {
     for (const ElfW(Dyn)* d = dyn; d->d_tag != DT_NULL; d++) {
         switch (d->d_tag) {
             case DT_SYMTAB:
-                symtab = reinterpret_cast<const ElfW(Sym)*>(d->d_un.d_ptr);
+                symtab = reinterpret_cast<const ElfW(Sym)*>(normalize_dyn_ptr(info, d->d_un.d_ptr));
                 break;
             case DT_STRTAB:
-                strtab = reinterpret_cast<const char*>(d->d_un.d_ptr);
+                strtab = reinterpret_cast<const char*>(normalize_dyn_ptr(info, d->d_un.d_ptr));
                 break;
             case DT_STRSZ:
                 strsz = static_cast<size_t>(d->d_un.d_val);
                 break;
             case DT_HASH:
-                hash = reinterpret_cast<const void*>(d->d_un.d_ptr);
+                hash = normalize_dyn_ptr(info, d->d_un.d_ptr);
                 break;
             case DT_GNU_HASH:
-                gnu_hash = reinterpret_cast<const void*>(d->d_un.d_ptr);
+                gnu_hash = normalize_dyn_ptr(info, d->d_un.d_ptr);
                 break;
             default:
                 break;
@@ -192,15 +262,12 @@ static bool build_dynsym_view(const dl_phdr_info* info, DynSymView& out) {
     return true;
 }
 
-static void* resolve_opencommon_by_exports() {
+static OpenCommonResolved resolve_opencommon_by_exports() {
     struct Ctx {
-        void* addr = nullptr;
-        char best_name[512] = {0};
+        OpenCommonResolved out;
         size_t best_score = 0;
-        int matches = 0;
-        int shared_ptr_matches = 0;
         int logged = 0;
-    } ctx;
+    } ctx{};
 
     auto cb = [](dl_phdr_info* info, size_t /*size*/, void* data) -> int {
         Ctx* c = reinterpret_cast<Ctx*>(data);
@@ -230,9 +297,8 @@ static void* resolve_opencommon_by_exports() {
             }
 
             // Prefer the overload whose first parameter is std::shared_ptr<DexFileContainer>.
-            // If a lib version only exports one OpenCommon, we still allow other candidates as fallback.
             const bool has_shared_ptr_container = is_opencommon_shared_ptr_container_overload(sym_name);
-            if (has_shared_ptr_container) c->shared_ptr_matches++;
+            if (has_shared_ptr_container) c->out.shared_ptr_matches++;
 
             const unsigned type = elf_st_type(s.st_info);
             if (type != STT_FUNC && type != STT_NOTYPE) {
@@ -246,7 +312,7 @@ static void* resolve_opencommon_by_exports() {
             void* addr = reinterpret_cast<void*>(base + s.st_value);
             if (!addr) continue;
 
-            c->matches++;
+            c->out.matches++;
             const size_t len = strlen(sym_name);
             // Log candidates (bounded).
             if (c->logged < 8) {
@@ -259,13 +325,20 @@ static void* resolve_opencommon_by_exports() {
             }
 
             // Scoring:
-            // - Strongly prefer the intended overload (shared_ptr<DexFileContainer> first arg)
-            // - Then prefer longer names (more specific template encoding)
-            const size_t score = (has_shared_ptr_container ? 1'000'000u : 0u) + len;
+            // - Prefer strict mangled encoding of shared_ptr<DexFileContainer> when available
+            // - Prefer shared_ptr<DexFileContainer> first-parameter overload when we need to disambiguate
+            // - Prefer longer names (more specific template encoding)
+            const bool strict_shared_ptr =
+                contains(sym_name, kOpenCommonNeedleSharedPtrContainer) ? true : false;
+            const size_t score =
+                (strict_shared_ptr ? 2'000'000u : 0u) + (has_shared_ptr_container ? 1'000'000u : 0u) + len;
+
             if (score > c->best_score) {
                 c->best_score = score;
-                c->addr = addr;
-                snprintf(c->best_name, sizeof(c->best_name), "%s", sym_name);
+                c->out.addr = addr;
+                snprintf(c->out.name, sizeof(c->out.name), "%s", sym_name);
+                c->out.flavor = has_shared_ptr_container ? OpenCommonFlavor::kSharedPtrContainerFirst
+                                                         : OpenCommonFlavor::kBaseSizeFirst;
             }
         }
 
@@ -275,23 +348,33 @@ static void* resolve_opencommon_by_exports() {
 
     dl_iterate_phdr(cb, &ctx);
 
-    if (!ctx.addr) {
-        LOGE("OpenCommon export fuzzy match failed (matches=%d shared_ptr_matches=%d)", ctx.matches, ctx.shared_ptr_matches);
-        return nullptr;
+    if (!ctx.out.addr) {
+        LOGE("OpenCommon export match failed: no DexFileLoader::OpenCommon found in exports");
+        return ctx.out;
     }
-    if (ctx.shared_ptr_matches == 0) {
-        LOGE("OpenCommon fuzzy match rejected: no shared_ptr<DexFileContainer> overload found (matches=%d)", ctx.matches);
-        return nullptr;
+
+    // Matching rules:
+    // - Find DexFileLoader::OpenCommon.
+    // - If not found: error and no-op.
+    // - If more than 1: require overload whose 1st parameter is std::shared_ptr<DexFileContainer>, else error and no-op.
+    // - If exactly 1: accept it; decide dex base/size argument positions based on 1st parameter type.
+    if (ctx.out.matches > 1 && ctx.out.shared_ptr_matches == 0) {
+        LOGE("OpenCommon export match rejected: multiple overloads but none has 1st param std::shared_ptr<DexFileContainer> (matches=%d)",
+             ctx.out.matches);
+        ctx.out = OpenCommonResolved{};
+        return ctx.out;
     }
-    if (ctx.matches > ctx.logged) {
-        LOGI("OpenCommon candidates truncated: logged=%d total=%d", ctx.logged, ctx.matches);
+
+    if (ctx.out.matches > ctx.logged) {
+        LOGI("OpenCommon candidates truncated: logged=%d total=%d", ctx.logged, ctx.out.matches);
     }
-    LOGI("OpenCommon fuzzy matched (matches=%d shared_ptr_matches=%d) => %s @ %p",
-         ctx.matches,
-         ctx.shared_ptr_matches,
-         ctx.best_name,
-         ctx.addr);
-    return ctx.addr;
+    LOGI("OpenCommon export matched (matches=%d shared_ptr_matches=%d) => %s @ %p flavor=%d",
+         ctx.out.matches,
+         ctx.out.shared_ptr_matches,
+         ctx.out.name,
+         ctx.out.addr,
+         static_cast<int>(ctx.out.flavor));
+    return ctx.out;
 }
 
 static bool mkdir_if_needed(const char* path, mode_t mode) {
@@ -413,7 +496,7 @@ struct UniquePtrLike {
     explicit operator bool() const { return p != nullptr; }
 };
 
-using OpenCommonFn = UniquePtrLike (*)(
+using OpenCommonSharedPtrFn = UniquePtrLike (*)(
     std::shared_ptr<void> /*container*/,
     const uint8_t* /*base*/,
     size_t /*app_compat_size*/,
@@ -425,22 +508,37 @@ using OpenCommonFn = UniquePtrLike (*)(
     std::string* /*error_msg*/,
     void* /*error_code*/);
 
-static OpenCommonFn g_orig_opencommon = nullptr;
+using OpenCommonBaseSizeFn = UniquePtrLike (*)(
+    const uint8_t* /*base*/,
+    size_t /*size*/,
+    const uint8_t* /*data_base*/,
+    size_t /*data_size*/,
+    const std::string& /*location*/,
+    uint32_t /*location_checksum*/,
+    const void* /*oat_dex_file*/,
+    bool /*verify*/,
+    bool /*verify_checksum*/,
+    std::string* /*error_msg*/,
+    UniquePtrLike /*container*/,
+    void* /*verify_result*/);
 
-static UniquePtrLike hooked_OpenCommon(std::shared_ptr<void> container,
-                                       const uint8_t* base,
-                                       size_t app_compat_size,
-                                       const std::string& location,
-                                       std::optional<uint32_t> location_checksum,
-                                       const void* oat_dex_file,
-                                       bool verify,
-                                       bool verify_checksum,
-                                       std::string* error_msg,
-                                       void* error_code) {
+static OpenCommonSharedPtrFn g_orig_opencommon_shared_ptr = nullptr;
+static OpenCommonBaseSizeFn g_orig_opencommon_base_size = nullptr;
+
+static UniquePtrLike hooked_OpenCommon_SharedPtr(std::shared_ptr<void> container,
+                                                const uint8_t* base,
+                                                size_t app_compat_size,
+                                                const std::string& location,
+                                                std::optional<uint32_t> location_checksum,
+                                                const void* oat_dex_file,
+                                                bool verify,
+                                                bool verify_checksum,
+                                                std::string* error_msg,
+                                                void* error_code) {
     (void)location;
     (void)location_checksum;
 
-    OpenCommonFn orig = g_orig_opencommon;
+    OpenCommonSharedPtrFn orig = g_orig_opencommon_shared_ptr;
     if (!orig) return {};
 
     UniquePtrLike ret = orig(std::move(container),
@@ -455,7 +553,52 @@ static UniquePtrLike hooked_OpenCommon(std::shared_ptr<void> container,
                              error_code);
 
     if (ret) {
+        // Params (excluding implicit this):
+        // 1: std::shared_ptr<DexFileContainer> container
+        // 2: dex data pointer
+        // 3: dex data length
         dump_dex_if_possible(base, app_compat_size);
+    }
+    return ret;
+}
+
+static UniquePtrLike hooked_OpenCommon_BaseSize(const uint8_t* base,
+                                               size_t size,
+                                               const uint8_t* data_base,
+                                               size_t data_size,
+                                               const std::string& location,
+                                               uint32_t location_checksum,
+                                               const void* oat_dex_file,
+                                               bool verify,
+                                               bool verify_checksum,
+                                               std::string* error_msg,
+                                               UniquePtrLike container,
+                                               void* verify_result) {
+    (void)data_base;
+    (void)data_size;
+    (void)location;
+    (void)location_checksum;
+
+    OpenCommonBaseSizeFn orig = g_orig_opencommon_base_size;
+    if (!orig) return {};
+
+    UniquePtrLike ret = orig(base,
+                             size,
+                             data_base,
+                             data_size,
+                             location,
+                             location_checksum,
+                             oat_dex_file,
+                             verify,
+                             verify_checksum,
+                             error_msg,
+                             std::move(container),
+                             verify_result);
+    if (ret) {
+        // Params (excluding implicit this):
+        // 1: dex data pointer
+        // 2: dex data length
+        dump_dex_if_possible(base, size);
     }
     return ret;
 }
@@ -484,30 +627,53 @@ static bool hook_opencommon_locked() {
     }
 
     dlerror(); // clear
-    void* sym = dlsym(RTLD_DEFAULT, kOpenCommonSym);
+    void* sym = nullptr;
+    OpenCommonFlavor flavor = OpenCommonFlavor::kUnknown;
+
+    // Fast path: try the known mangled name for the shared_ptr<DexFileContainer> overload.
+    sym = dlsym(RTLD_DEFAULT, kOpenCommonSym);
     if (!sym) {
         // try from explicit handle
         dlerror(); // clear
         sym = dlsym(handle, kOpenCommonSym);
     }
-    if (!sym) {
-        // Fuzzy search for different libdexfile versions.
-        sym = resolve_opencommon_by_exports();
+    if (sym) {
+        flavor = OpenCommonFlavor::kSharedPtrContainerFirst;
+    } else {
+        // Export scan with overload selection rules.
+        OpenCommonResolved r = resolve_opencommon_by_exports();
+        sym = r.addr;
+        flavor = r.flavor;
     }
-    if (!sym) {
-        LOGE("OpenCommon symbol not found (exact + fuzzy failed). last dlerror=%s", dlerr());
+
+    if (!sym || flavor == OpenCommonFlavor::kUnknown) {
+        LOGE("OpenCommon symbol not resolved; skip hook. last dlerror=%s", dlerr());
         return false;
     }
 
     void* orig = nullptr;
-    int rc = DobbyHook(sym, to_void_ptr(hooked_OpenCommon), &orig);
+    int rc = -1;
+    if (flavor == OpenCommonFlavor::kSharedPtrContainerFirst) {
+        rc = DobbyHook(sym, to_void_ptr(hooked_OpenCommon_SharedPtr), &orig);
+        if (rc == 0 && orig) {
+            g_orig_opencommon_shared_ptr = reinterpret_cast<OpenCommonSharedPtrFn>(orig);
+        }
+    } else if (flavor == OpenCommonFlavor::kBaseSizeFirst) {
+        rc = DobbyHook(sym, to_void_ptr(hooked_OpenCommon_BaseSize), &orig);
+        if (rc == 0 && orig) {
+            g_orig_opencommon_base_size = reinterpret_cast<OpenCommonBaseSizeFn>(orig);
+        }
+    } else {
+        LOGE("Unsupported OpenCommon flavor=%d, skip hook", static_cast<int>(flavor));
+        return false;
+    }
+
     if (rc == 0 && orig) {
-        g_orig_opencommon = reinterpret_cast<OpenCommonFn>(orig);
         g_opencommon_hooked.store(true, std::memory_order_release);
-        LOGI("Hooked OpenCommon @ %p", sym);
+        LOGI("Hooked OpenCommon @ %p flavor=%d", sym, static_cast<int>(flavor));
         return true;
     }
-    LOGE("Failed to hook OpenCommon @ %p (rc=%d orig=%p)", sym, rc, orig);
+    LOGE("Failed to hook OpenCommon @ %p flavor=%d (rc=%d orig=%p)", sym, static_cast<int>(flavor), rc, orig);
     return false;
 }
 
