@@ -4,6 +4,8 @@
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <elf.h>
+#include <link.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -32,6 +34,13 @@ namespace {
 constexpr const char* kLibDexfile = "libdexfile.so";
 constexpr const char* kOpenCommonSym =
     "_ZN3art13DexFileLoader10OpenCommonENSt3__110shared_ptrINS_16DexFileContainerEEEPKhmRKNS1_12basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEENS1_8optionalIjEEPKNS_10OatDexFileEbbPSC_PNS_22DexFileLoaderErrorCodeE";
+constexpr const char* kOpenCommonNeedle1 = "_ZN3art13DexFileLoader10OpenCommonE";
+constexpr const char* kOpenCommonNeedle2 = "DexFileLoader10OpenCommon";
+// Extra constraint to pick the intended overload:
+// OpenCommon(std::shared_ptr<DexFileContainer>, ...)
+constexpr const char* kOpenCommonNeedleSharedPtrContainer = "NSt3__110shared_ptrINS_16DexFileContainerEEE";
+constexpr const char* kNeedleSharedPtr = "shared_ptr";
+constexpr const char* kNeedleDexFileContainer = "DexFileContainer";
 
 static std::string g_pkg;
 static std::once_flag g_mkdir_once;
@@ -44,6 +53,244 @@ static std::mutex g_hook_mu;
 static const char* dlerr() {
     const char* e = dlerror();
     return (e && e[0] != '\0') ? e : "unknown";
+}
+
+static bool ends_with(const char* s, const char* suffix) {
+    if (!s || !suffix) return false;
+    const size_t ls = strlen(s);
+    const size_t lf = strlen(suffix);
+    if (lf > ls) return false;
+    return memcmp(s + (ls - lf), suffix, lf) == 0;
+}
+
+static bool contains(const char* haystack, const char* needle) {
+    if (!haystack || !needle) return false;
+    return strstr(haystack, needle) != nullptr;
+}
+
+static unsigned elf_st_type(unsigned char st_info) {
+#if defined(__LP64__)
+    return ELF64_ST_TYPE(st_info);
+#else
+    return ELF32_ST_TYPE(st_info);
+#endif
+}
+
+static bool is_opencommon_shared_ptr_container_overload(const char* sym_name) {
+    if (!sym_name) return false;
+    // Prefer strict mangled encoding when present, but allow more relaxed matching
+    // to tolerate libc++ inline namespace differences (e.g. __1 vs __ndk1).
+    if (contains(sym_name, kOpenCommonNeedleSharedPtrContainer)) return true;
+    return contains(sym_name, kNeedleSharedPtr) && contains(sym_name, kNeedleDexFileContainer);
+}
+
+static size_t symcount_from_gnu_hash(const void* gnu_hash) {
+    if (!gnu_hash) return 0;
+
+    const uint8_t* p = reinterpret_cast<const uint8_t*>(gnu_hash);
+    const uint32_t nbuckets = *reinterpret_cast<const uint32_t*>(p + 0);
+    const uint32_t symoffset = *reinterpret_cast<const uint32_t*>(p + 4);
+    const uint32_t bloom_size = *reinterpret_cast<const uint32_t*>(p + 8);
+    // bloom_shift at +12 (unused here)
+
+    if (nbuckets == 0) return symoffset;
+
+    // Layout:
+    // u32 nbuckets; u32 symoffset; u32 bloom_size; u32 bloom_shift;
+    // ElfW(Addr) bloom[bloom_size];
+    // u32 buckets[nbuckets];
+    // u32 chain[];
+    const size_t hdr_sz = 16;
+    const size_t bloom_sz_bytes = static_cast<size_t>(bloom_size) * sizeof(ElfW(Addr));
+    const uint32_t* buckets = reinterpret_cast<const uint32_t*>(p + hdr_sz + bloom_sz_bytes);
+    const uint32_t* chain = buckets + nbuckets;
+
+    uint32_t max_sym = 0;
+    for (uint32_t i = 0; i < nbuckets; i++) {
+        if (buckets[i] > max_sym) max_sym = buckets[i];
+    }
+    if (max_sym < symoffset) return symoffset;
+
+    // Walk the chain table until we hit an entry with LSB=1 (end of chain).
+    uint32_t idx = max_sym;
+    while (true) {
+        const uint32_t c = chain[idx - symoffset];
+        idx++;
+        if ((c & 1u) != 0) break;
+        // safety bound (shouldn't happen unless corrupt)
+        if (idx - max_sym > 1'000'000u) return 0;
+    }
+    return static_cast<size_t>(idx);
+}
+
+struct DynSymView {
+    const ElfW(Sym)* symtab = nullptr;
+    const char* strtab = nullptr;
+    size_t strsz = 0;
+    size_t symcount = 0;
+};
+
+static bool build_dynsym_view(const dl_phdr_info* info, DynSymView& out) {
+    if (!info || !info->dlpi_phdr) return false;
+    const ElfW(Addr) base = static_cast<ElfW(Addr)>(info->dlpi_addr);
+
+    const ElfW(Phdr)* phdr = info->dlpi_phdr;
+    const ElfW(Dyn)* dyn = nullptr;
+    for (ElfW(Half) i = 0; i < info->dlpi_phnum; i++) {
+        if (phdr[i].p_type == PT_DYNAMIC) {
+            dyn = reinterpret_cast<const ElfW(Dyn)*>(base + phdr[i].p_vaddr);
+            break;
+        }
+    }
+    if (!dyn) return false;
+
+    const void* hash = nullptr;
+    const void* gnu_hash = nullptr;
+    const ElfW(Sym)* symtab = nullptr;
+    const char* strtab = nullptr;
+    size_t strsz = 0;
+
+    for (const ElfW(Dyn)* d = dyn; d->d_tag != DT_NULL; d++) {
+        switch (d->d_tag) {
+            case DT_SYMTAB:
+                symtab = reinterpret_cast<const ElfW(Sym)*>(d->d_un.d_ptr);
+                break;
+            case DT_STRTAB:
+                strtab = reinterpret_cast<const char*>(d->d_un.d_ptr);
+                break;
+            case DT_STRSZ:
+                strsz = static_cast<size_t>(d->d_un.d_val);
+                break;
+            case DT_HASH:
+                hash = reinterpret_cast<const void*>(d->d_un.d_ptr);
+                break;
+            case DT_GNU_HASH:
+                gnu_hash = reinterpret_cast<const void*>(d->d_un.d_ptr);
+                break;
+            default:
+                break;
+        }
+    }
+
+    if (!symtab || !strtab) return false;
+
+    size_t symcount = 0;
+    if (hash) {
+        // DT_HASH: u32 nbucket; u32 nchain; ...
+        const uint32_t* h = reinterpret_cast<const uint32_t*>(hash);
+        symcount = static_cast<size_t>(h[1]);
+    } else if (gnu_hash) {
+        symcount = symcount_from_gnu_hash(gnu_hash);
+    }
+    if (symcount == 0) return false;
+
+    out.symtab = symtab;
+    out.strtab = strtab;
+    out.strsz = strsz;
+    out.symcount = symcount;
+    return true;
+}
+
+static void* resolve_opencommon_by_exports() {
+    struct Ctx {
+        void* addr = nullptr;
+        char best_name[512] = {0};
+        size_t best_score = 0;
+        int matches = 0;
+        int shared_ptr_matches = 0;
+        int logged = 0;
+    } ctx;
+
+    auto cb = [](dl_phdr_info* info, size_t /*size*/, void* data) -> int {
+        Ctx* c = reinterpret_cast<Ctx*>(data);
+        if (!info || !c) return 0;
+
+        const char* name = info->dlpi_name;
+        // dlpi_name may be empty for main executable.
+        if (!name || name[0] == '\0') return 0;
+        if (!ends_with(name, kLibDexfile) && !contains(name, "/libdexfile.so")) return 0;
+
+        DynSymView view;
+        if (!build_dynsym_view(info, view)) {
+            LOGE("failed to parse dynsym for %s", name);
+            return 0;
+        }
+
+        for (size_t i = 0; i < view.symcount; i++) {
+            const ElfW(Sym)& s = view.symtab[i];
+            if (s.st_name == 0) continue;
+            if (view.strsz != 0 && s.st_name >= view.strsz) continue;
+
+            const char* sym_name = view.strtab + s.st_name;
+            if (!sym_name || sym_name[0] == '\0') continue;
+
+            if (!contains(sym_name, kOpenCommonNeedle2) && !contains(sym_name, kOpenCommonNeedle1)) {
+                continue;
+            }
+
+            // Prefer the overload whose first parameter is std::shared_ptr<DexFileContainer>.
+            // If a lib version only exports one OpenCommon, we still allow other candidates as fallback.
+            const bool has_shared_ptr_container = is_opencommon_shared_ptr_container_overload(sym_name);
+            if (has_shared_ptr_container) c->shared_ptr_matches++;
+
+            const unsigned type = elf_st_type(s.st_info);
+            if (type != STT_FUNC && type != STT_NOTYPE) {
+                // Some Android builds mark as NOTYPE; accept both.
+                // Anything else is unlikely to be callable.
+                continue;
+            }
+            if (s.st_shndx == SHN_UNDEF) continue;
+
+            const ElfW(Addr) base = static_cast<ElfW(Addr)>(info->dlpi_addr);
+            void* addr = reinterpret_cast<void*>(base + s.st_value);
+            if (!addr) continue;
+
+            c->matches++;
+            const size_t len = strlen(sym_name);
+            // Log candidates (bounded).
+            if (c->logged < 8) {
+                LOGI("OpenCommon candidate[%d]: shared_ptr_container=%d %s @ %p",
+                     c->logged,
+                     has_shared_ptr_container ? 1 : 0,
+                     sym_name,
+                     addr);
+                c->logged++;
+            }
+
+            // Scoring:
+            // - Strongly prefer the intended overload (shared_ptr<DexFileContainer> first arg)
+            // - Then prefer longer names (more specific template encoding)
+            const size_t score = (has_shared_ptr_container ? 1'000'000u : 0u) + len;
+            if (score > c->best_score) {
+                c->best_score = score;
+                c->addr = addr;
+                snprintf(c->best_name, sizeof(c->best_name), "%s", sym_name);
+            }
+        }
+
+        // Continue iterating in case there are multiple mappings; but for a single module this is enough.
+        return 0;
+    };
+
+    dl_iterate_phdr(cb, &ctx);
+
+    if (!ctx.addr) {
+        LOGE("OpenCommon export fuzzy match failed (matches=%d shared_ptr_matches=%d)", ctx.matches, ctx.shared_ptr_matches);
+        return nullptr;
+    }
+    if (ctx.shared_ptr_matches == 0) {
+        LOGE("OpenCommon fuzzy match rejected: no shared_ptr<DexFileContainer> overload found (matches=%d)", ctx.matches);
+        return nullptr;
+    }
+    if (ctx.matches > ctx.logged) {
+        LOGI("OpenCommon candidates truncated: logged=%d total=%d", ctx.logged, ctx.matches);
+    }
+    LOGI("OpenCommon fuzzy matched (matches=%d shared_ptr_matches=%d) => %s @ %p",
+         ctx.matches,
+         ctx.shared_ptr_matches,
+         ctx.best_name,
+         ctx.addr);
+    return ctx.addr;
 }
 
 static bool mkdir_if_needed(const char* path, mode_t mode) {
@@ -232,7 +479,11 @@ static bool hook_opencommon_locked() {
         sym = dlsym(handle, kOpenCommonSym);
     }
     if (!sym) {
-        LOGE("dlsym failed: %s (%s)", kOpenCommonSym, dlerr());
+        // Fuzzy search for different libdexfile versions.
+        sym = resolve_opencommon_by_exports();
+    }
+    if (!sym) {
+        LOGE("OpenCommon symbol not found (exact + fuzzy failed). last dlerror=%s", dlerr());
         return false;
     }
 
