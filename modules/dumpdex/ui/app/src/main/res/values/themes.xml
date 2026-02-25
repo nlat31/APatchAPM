@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.SampleSettings" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/sample_primary</item>
+        <item name="colorOnPrimary">@color/sample_on_primary</item>
+        <item name="colorPrimaryContainer">@color/sample_primary_container</item>
+        <item name="colorOnPrimaryContainer">@color/sample_on_primary_container</item>
+
+        <item name="colorSecondary">@color/sample_secondary</item>
+        <item name="colorOnSecondary">@color/sample_on_secondary</item>
+        <item name="colorSecondaryContainer">@color/sample_secondary_container</item>
+        <item name="colorOnSecondaryContainer">@color/sample_on_secondary_container</item>
+
+        <item name="colorTertiary">@color/sample_tertiary</item>
+        <item name="colorOnTertiary">@color/sample_on_tertiary</item>
+        <item name="colorTertiaryContainer">@color/sample_tertiary_container</item>
+        <item name="colorOnTertiaryContainer">@color/sample_on_tertiary_container</item>
+
+        <item name="colorSurface">@color/sample_surface</item>
+        <item name="colorOnSurface">@color/sample_on_surface</item>
+        <item name="colorSurfaceVariant">@color/sample_surface_variant</item>
+        <item name="colorOnSurfaceVariant">@color/sample_on_surface_variant</item>
+
+        <item name="colorOutline">@color/sample_outline</item>
+
+        <item name="android:colorBackground">@color/sample_background</item>
+
+        <item name="android:statusBarColor">?attr/colorPrimary</item>
+        <item name="android:navigationBarColor">?attr/colorSurface</item>
+    </style>
+</resources>
+

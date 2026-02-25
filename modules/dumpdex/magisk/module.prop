@@ -1,0 +1,7 @@
+id=dumpdex
+name=DumpDex
+version=v1.0.0
+versionCode=1
+author=developer
+description=Zygisk module to dump dex files from libdexfile OpenCommon
+

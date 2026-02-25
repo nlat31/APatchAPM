@@ -1,0 +1,17 @@
+package com.apm.dumpdex;
+
+import androidx.lifecycle.ViewModel;
+
+import java.util.LinkedHashSet;
+import java.util.Set;
+
+public class SharedViewModel extends ViewModel {
+    public boolean showSystemApps = false;
+    public final Set<String> selectedPackages = new LinkedHashSet<>();
+
+    public void loadFromConfig(ConfigStore.Config cfg) {
+        selectedPackages.clear();
+        if (cfg != null && cfg.packages != null) selectedPackages.addAll(cfg.packages);
+    }
+}
+
