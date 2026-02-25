@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">DumpDex Settings</string>
+    <string name="app_name">DumpDex</string>
     <string name="tab_apps">Apps</string>
     <string name="tab_options">Options</string>
     <string name="apply">Apply</string>

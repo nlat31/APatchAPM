@@ -46,6 +46,7 @@ static std::string g_pkg;
 static std::once_flag g_mkdir_once;
 static std::atomic<bool> g_dumpdir_ok{false};
 static std::atomic<uint32_t> g_index{1};
+static std::string g_dumpdir;
 static std::atomic<bool> g_opencommon_hooked{false};
 static std::atomic<bool> g_dlopen_hooked{false};
 static std::mutex g_hook_mu;
@@ -306,14 +307,25 @@ static bool ensure_dump_dir() {
         return false;
     }
     std::call_once(g_mkdir_once, []() {
-        std::string dir = std::string("/data/data/") + g_pkg + "/dumpdex";
-        if (mkdir_if_needed(dir.c_str(), 0700)) {
-            g_dumpdir_ok.store(true, std::memory_order_release);
+        const pid_t pid = getpid();
+        std::string base = std::string("/data/data/") + g_pkg + "/dumpdex";
+        std::string dir = base + "/" + std::to_string(static_cast<long long>(pid));
+
+        if (!mkdir_if_needed(base.c_str(), 0700)) {
+            int e = errno;
+            LOGE("mkdir failed: %s (errno=%d: %s)", base.c_str(), e, strerror(e));
+            g_dumpdir_ok.store(false, std::memory_order_release);
             return;
         }
-        int e = errno;
-        LOGE("mkdir failed: %s (errno=%d: %s)", dir.c_str(), e, strerror(e));
-        g_dumpdir_ok.store(false, std::memory_order_release);
+        if (!mkdir_if_needed(dir.c_str(), 0700)) {
+            int e = errno;
+            LOGE("mkdir failed: %s (errno=%d: %s)", dir.c_str(), e, strerror(e));
+            g_dumpdir_ok.store(false, std::memory_order_release);
+            return;
+        }
+
+        g_dumpdir = std::move(dir);
+        g_dumpdir_ok.store(true, std::memory_order_release);
     });
     if (!g_dumpdir_ok.load(std::memory_order_acquire)) {
         LOGE("dump dir is not available, skip dumping");
@@ -348,9 +360,9 @@ static void dump_dex_if_possible(const uint8_t* base, size_t size) {
 
     uint32_t idx = g_index.fetch_add(1, std::memory_order_relaxed);
     char path[512];
-    int n = snprintf(path, sizeof(path), "/data/data/%s/dumpdex/%u-classes.dex", g_pkg.c_str(), idx);
+    int n = snprintf(path, sizeof(path), "%s/%u-classes.dex", g_dumpdir.c_str(), idx);
     if (n <= 0 || static_cast<size_t>(n) >= sizeof(path)) {
-        LOGE("path too long for package=%s", g_pkg.c_str());
+        LOGE("path too long for package=%s dumpdir=%s", g_pkg.c_str(), g_dumpdir.c_str());
         return;
     }
 
