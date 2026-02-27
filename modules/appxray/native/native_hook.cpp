@@ -41,6 +41,7 @@ namespace native_hook {
 
 static std::mutex g_mu;
 static std::unordered_map<int, std::string> g_fd_path;
+static std::unordered_map<int, off_t> g_fd_off;
 static std::vector<std::string> g_patterns;
 static int g_log_fd = -1;
 
@@ -157,6 +158,7 @@ static void set_patterns(const char *file_names) {
     std::lock_guard lk(g_mu);
     g_patterns = std::move(out);
     g_fd_path.clear();
+    g_fd_off.clear();
 }
 
 static bool match_path(const char *path) {
@@ -177,6 +179,8 @@ static void record_open_fd(int fd, const char *path) {
     if (!match_path(path)) return;
     std::lock_guard lk(g_mu);
     g_fd_path[fd] = path;
+    // Best-effort file offset tracking; starts from 0 unless we observe lseek/read/write.
+    g_fd_off[fd] = 0;
 }
 
 static const char *path_of_fd(int fd, std::string &tmp) {
@@ -188,9 +192,24 @@ static const char *path_of_fd(int fd, std::string &tmp) {
     return tmp.c_str();
 }
 
+static off_t offset_of_fd(int fd) {
+    std::lock_guard lk(g_mu);
+    auto it = g_fd_off.find(fd);
+    if (it == g_fd_off.end()) return 0;
+    return it->second;
+}
+
+static void set_offset_of_fd(int fd, off_t off) {
+    std::lock_guard lk(g_mu);
+    auto it = g_fd_off.find(fd);
+    if (it == g_fd_off.end()) return;
+    it->second = off;
+}
+
 static void erase_fd(int fd) {
     std::lock_guard lk(g_mu);
     g_fd_path.erase(fd);
+    g_fd_off.erase(fd);
 }
 
 // ---- libc function pointers ----
@@ -249,31 +268,37 @@ static int hooked_openat(int dirfd, const char *pathname, int flags, ...) {
 
 static off_t hooked_lseek(int fd, off_t offset, int whence) {
     off_t r = orig_lseek ? orig_lseek(fd, offset, whence) : (off_t)-1;
-    std::string p;
-    const char *path = path_of_fd(fd, p);
-    if (path) {
-        log_line("lseek(fd=%d, path=%s, offset=%lld, whence=%d) => %lld",
-             fd, path, (long long)offset, whence, (long long)r);
+    if (r != (off_t)-1) {
+        // No lseek logs; just keep offset state updated for later read/write logs.
+        set_offset_of_fd(fd, r);
     }
     return r;
 }
 
 static ssize_t hooked_read(int fd, void *buf, size_t count) {
+    off_t off = offset_of_fd(fd);
     ssize_t r = orig_read ? orig_read(fd, buf, count) : -1;
     std::string p;
     const char *path = path_of_fd(fd, p);
     if (path) {
-        log_line("read(fd=%d, path=%s, count=%zu) => %zd", fd, path, count, r);
+        log_line("read(fd=%d, path=%s, off=%lld, bytes=%zd)", fd, path, (long long)off, r);
+    }
+    if (r > 0) {
+        set_offset_of_fd(fd, off + (off_t)r);
     }
     return r;
 }
 
 static ssize_t hooked_write(int fd, const void *buf, size_t count) {
+    off_t off = offset_of_fd(fd);
     ssize_t r = orig_write ? orig_write(fd, buf, count) : -1;
     std::string p;
     const char *path = path_of_fd(fd, p);
     if (path) {
-        log_line("write(fd=%d, path=%s, count=%zu) => %zd", fd, path, count, r);
+        log_line("write(fd=%d, path=%s, off=%lld, bytes=%zd)", fd, path, (long long)off, r);
+    }
+    if (r > 0) {
+        set_offset_of_fd(fd, off + (off_t)r);
     }
     return r;
 }
