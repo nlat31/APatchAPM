@@ -20,11 +20,13 @@ public final class ConfigStore {
 
     public static final class Config {
         public final boolean fileMonitorEnabled;
+        public final boolean dlMonitorEnabled;
         public final String fileNames;
         public final Set<String> packages;
 
-        public Config(boolean fileMonitorEnabled, String fileNames, Set<String> packages) {
+        public Config(boolean fileMonitorEnabled, boolean dlMonitorEnabled, String fileNames, Set<String> packages) {
             this.fileMonitorEnabled = fileMonitorEnabled;
+            this.dlMonitorEnabled = dlMonitorEnabled;
             this.fileNames = fileNames != null ? fileNames : "";
             this.packages = packages != null ? packages : new HashSet<String>();
         }
@@ -48,6 +50,7 @@ public final class ConfigStore {
             }
             return new Config(
                 obj.optBoolean("file_monitor_enabled", false),
+                obj.optBoolean("dl_monitor_enabled", false),
                 obj.optString("file_names", ""),
                 pkgs
             );
@@ -61,6 +64,7 @@ public final class ConfigStore {
             JSONObject obj = new JSONObject();
             obj.put("version", 1);
             obj.put("file_monitor_enabled", cfg != null && cfg.fileMonitorEnabled);
+            obj.put("dl_monitor_enabled", cfg != null && cfg.dlMonitorEnabled);
             obj.put("file_names", cfg != null && cfg.fileNames != null ? cfg.fileNames : "");
 
             List<String> pkgs = new ArrayList<>();

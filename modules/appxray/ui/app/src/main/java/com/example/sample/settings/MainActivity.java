@@ -29,7 +29,9 @@ public class MainActivity extends AppCompatActivity {
 
         pager.setAdapter(new MainPagerAdapter(this));
         new TabLayoutMediator(tabs, pager, (tab, pos) -> {
-            tab.setText(getString(pos == 0 ? R.string.tab_apps : R.string.tab_options));
+            if (pos == 0) tab.setText(getString(R.string.tab_apps));
+            else if (pos == 1) tab.setText(getString(R.string.tab_options));
+            else tab.setText(getString(R.string.tab_dl_monitor));
         }).attach();
 
         Runnable updateClearVisibility = () -> btnClear.setVisibility(pager.getCurrentItem() == 0 ? android.view.View.VISIBLE : android.view.View.GONE);
@@ -69,6 +71,7 @@ public class MainActivity extends AppCompatActivity {
 
             ConfigStore.Config cfg = new ConfigStore.Config(
                 vm.fileMonitorEnabled,
+                vm.dlMonitorEnabled,
                 vm.fileNames,
                 new java.util.LinkedHashSet<>(vm.selectedPackages)
             );

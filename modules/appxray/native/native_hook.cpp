@@ -42,8 +42,10 @@ namespace native_hook {
 static std::mutex g_mu;
 static std::unordered_map<int, std::string> g_fd_path;
 static std::unordered_map<int, off_t> g_fd_off;
+static std::unordered_map<void *, std::string> g_handle_path;
 static std::vector<std::string> g_patterns;
 static int g_log_fd = -1;
+static thread_local bool t_suppress_dl = false;
 
 static inline bool is_ws(char c) {
     return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f';
@@ -212,6 +214,21 @@ static void erase_fd(int fd) {
     g_fd_off.erase(fd);
 }
 
+static void record_handle(void *handle, const char *path) {
+    if (!handle) return;
+    std::lock_guard lk(g_mu);
+    g_handle_path[handle] = path ? path : "null";
+}
+
+static const char *path_of_handle(void *handle, std::string &tmp) {
+    if (!handle) return nullptr;
+    std::lock_guard lk(g_mu);
+    auto it = g_handle_path.find(handle);
+    if (it == g_handle_path.end()) return nullptr;
+    tmp = it->second;
+    return tmp.c_str();
+}
+
 // ---- libc function pointers ----
 static int (*orig_open)(const char *pathname, int flags, ...) = nullptr;
 static int (*orig_openat)(int dirfd, const char *pathname, int flags, ...) = nullptr;
@@ -219,6 +236,8 @@ static ssize_t (*orig_read)(int fd, void *buf, size_t count) = nullptr;
 static ssize_t (*orig_write)(int fd, const void *buf, size_t count) = nullptr;
 static off_t (*orig_lseek)(int fd, off_t offset, int whence) = nullptr;
 static int (*orig_close)(int fd) = nullptr;
+static void *(*orig_dlopen)(const char *filename, int flag) = nullptr;
+static void *(*orig_dlsym)(void *handle, const char *symbol) = nullptr;
 
 static int hooked_open(const char *pathname, int flags, ...) {
     mode_t mode = 0;
@@ -314,6 +333,33 @@ static int hooked_close(int fd) {
     return r;
 }
 
+static void *hooked_dlopen(const char *filename, int flag) {
+    if (t_suppress_dl) {
+        return orig_dlopen ? orig_dlopen(filename, flag) : nullptr;
+    }
+    void *h = orig_dlopen ? orig_dlopen(filename, flag) : nullptr;
+    if (h) {
+        record_handle(h, filename);
+    }
+    log_line("dlopen(path=%s, flag=0x%x) => %p", filename ? filename : "null", flag, h);
+    return h;
+}
+
+static void *hooked_dlsym(void *handle, const char *symbol) {
+    if (t_suppress_dl) {
+        return orig_dlsym ? orig_dlsym(handle, symbol) : nullptr;
+    }
+    void *p = orig_dlsym ? orig_dlsym(handle, symbol) : nullptr;
+    std::string so;
+    const char *path = path_of_handle(handle, so);
+    if (path) {
+        log_line("dlsym(so=%s, sym=%s) => %p", path, symbol ? symbol : "null", p);
+    } else {
+        log_line("dlsym(sym=%s) => %p", symbol ? symbol : "null", p);
+    }
+    return p;
+}
+
 static void *sym(void *handle, const char *name) {
     void *p = dlsym(handle, name);
     if (!p) p = dlsym(RTLD_DEFAULT, name);
@@ -335,23 +381,51 @@ static void hook_one(void *handle, const char *name, void *replace, void **backu
     }
 }
 
-void install_hooks(const char *package_name, const char *file_names) {
+void install_hooks(const char *package_name,
+                   const char *file_names,
+                   bool file_monitor_enabled,
+                   bool dl_monitor_enabled) {
     ensure_logger(package_name);
-    log_line("Installing file hooks (patterns=%s)", file_names ? file_names : "");
-    set_patterns(file_names);
+    log_line("Installing hooks (file=%d dl=%d patterns=%s)",
+             file_monitor_enabled ? 1 : 0,
+             dl_monitor_enabled ? 1 : 0,
+             file_names ? file_names : "");
 
-    void *libc = dlopen("libc.so", RTLD_NOW);
-    if (!libc) {
-        log_line("dlopen(libc.so) failed: %s", dlerror());
-        return;
+    if (file_monitor_enabled) {
+        set_patterns(file_names);
     }
 
-    hook_one(libc, "open", to_void_ptr(hooked_open), reinterpret_cast<void **>(&orig_open));
-    hook_one(libc, "openat", to_void_ptr(hooked_openat), reinterpret_cast<void **>(&orig_openat));
-    hook_one(libc, "read", to_void_ptr(hooked_read), reinterpret_cast<void **>(&orig_read));
-    hook_one(libc, "write", to_void_ptr(hooked_write), reinterpret_cast<void **>(&orig_write));
-    hook_one(libc, "lseek", to_void_ptr(hooked_lseek), reinterpret_cast<void **>(&orig_lseek));
-    hook_one(libc, "close", to_void_ptr(hooked_close), reinterpret_cast<void **>(&orig_close));
+    t_suppress_dl = true;
+
+    if (file_monitor_enabled) {
+        void *libc = dlopen("libc.so", RTLD_NOW);
+        if (!libc) {
+            log_line("dlopen(libc.so) failed: %s", dlerror());
+            t_suppress_dl = false;
+            return;
+        }
+
+        hook_one(libc, "open", to_void_ptr(hooked_open), reinterpret_cast<void **>(&orig_open));
+        hook_one(libc, "openat", to_void_ptr(hooked_openat), reinterpret_cast<void **>(&orig_openat));
+        hook_one(libc, "read", to_void_ptr(hooked_read), reinterpret_cast<void **>(&orig_read));
+        hook_one(libc, "write", to_void_ptr(hooked_write), reinterpret_cast<void **>(&orig_write));
+        hook_one(libc, "lseek", to_void_ptr(hooked_lseek), reinterpret_cast<void **>(&orig_lseek));
+        hook_one(libc, "close", to_void_ptr(hooked_close), reinterpret_cast<void **>(&orig_close));
+    }
+
+    if (dl_monitor_enabled) {
+        void *libdl = dlopen("libdl.so", RTLD_NOW);
+        if (!libdl) {
+            log_line("dlopen(libdl.so) failed: %s", dlerror());
+            t_suppress_dl = false;
+            return;
+        }
+
+        hook_one(libdl, "dlopen", to_void_ptr(hooked_dlopen), reinterpret_cast<void **>(&orig_dlopen));
+        hook_one(libdl, "dlsym", to_void_ptr(hooked_dlsym), reinterpret_cast<void **>(&orig_dlsym));
+    }
+
+    t_suppress_dl = false;
 }
 
 } // namespace native_hook

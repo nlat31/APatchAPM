@@ -25,6 +25,7 @@
 
 struct ModuleConfig {
     bool file_monitor_enabled = false;
+    bool dl_monitor_enabled = false;
     std::string file_names;
     std::vector<std::string> packages;
     time_t mtime = 0;
@@ -189,6 +190,7 @@ static const ModuleConfig &load_config_cached() {
     next.loaded = true;
     next.mtime = st.st_mtime;
     next.file_monitor_enabled = parse_bool_by_key(json, "file_monitor_enabled", false);
+    next.dl_monitor_enabled = parse_bool_by_key(json, "dl_monitor_enabled", false);
     next.file_names = parse_string_by_key(json, "file_names", "");
     next.packages = parse_string_array_by_key(json, "packages");
 
@@ -212,6 +214,7 @@ public:
         // (UI can toggle "show system apps" and write them into packages.)
         should_inject_ = matches_any_package(proc, cfg.packages);
         file_monitor_enabled_ = should_inject_ && cfg.file_monitor_enabled;
+        dl_monitor_enabled_ = should_inject_ && cfg.dl_monitor_enabled;
         file_names_ = cfg.file_names;
         package_name_ = proc;
         auto colon = package_name_.find(':');
@@ -231,8 +234,13 @@ public:
     void postAppSpecialize(const zygisk::AppSpecializeArgs * /*args*/) override {
         if (!should_inject_) return;
 
-        if (file_monitor_enabled_) {
-            appxray::native_hook::install_hooks(package_name_.c_str(), file_names_.c_str());
+        if (file_monitor_enabled_ || dl_monitor_enabled_) {
+            appxray::native_hook::install_hooks(
+                package_name_.c_str(),
+                file_names_.c_str(),
+                file_monitor_enabled_,
+                dl_monitor_enabled_
+            );
         }
     }
 
@@ -245,6 +253,7 @@ private:
     JNIEnv      *env_ = nullptr;
     bool         should_inject_ = false;
     bool         file_monitor_enabled_ = false;
+    bool         dl_monitor_enabled_ = false;
     std::string  file_names_;
     std::string  package_name_;
 };

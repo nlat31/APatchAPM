@@ -13,12 +13,14 @@ public class MainPagerAdapter extends FragmentStateAdapter {
     @NonNull
     @Override
     public Fragment createFragment(int position) {
-        return position == 0 ? new AppsFragment() : new OptionsFragment();
+        if (position == 0) return new AppsFragment();
+        if (position == 1) return new OptionsFragment();
+        return new DlMonitorFragment();
     }
 
     @Override
     public int getItemCount() {
-        return 2;
+        return 3;
     }
 }
 

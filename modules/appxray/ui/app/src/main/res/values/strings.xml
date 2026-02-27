@@ -3,6 +3,7 @@
     <string name="app_name">AppXray</string>
     <string name="tab_apps">Apps</string>
     <string name="tab_options">File Monitor</string>
+    <string name="tab_dl_monitor">DL Monitor</string>
     <string name="apply">Apply</string>
     <string name="clear_selection">Clear</string>
     <string name="apps_tip">Select target apps that this module should apply to.</string>
@@ -13,5 +14,8 @@
     <string name="file_names_label">File names</string>
     <string name="file_names_hint">e.g. libart.so base.apk  /data/</string>
     <string name="file_monitor_tip">When enabled, AppXray hooks open/seek/read/write/close and logs operations. File name matching uses substring; multiple names are separated by spaces (multiple spaces allowed). Leave empty to monitor all files.</string>
+
+    <string name="dl_monitor_enable">Enable dlopen/dlsym monitor</string>
+    <string name="dl_monitor_tip">When enabled, AppXray hooks dlopen/dlsym and logs which libraries are loaded and which symbols are queried.</string>
 </resources>
 
