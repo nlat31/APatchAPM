@@ -1,0 +1,7 @@
+id=appxray
+name=AppXray
+version=v1.0.0
+versionCode=1
+author=developer
+description=File operation tracing (open/seek/read/write/close)
+

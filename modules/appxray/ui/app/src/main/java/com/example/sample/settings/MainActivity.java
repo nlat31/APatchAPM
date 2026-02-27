@@ -68,13 +68,13 @@ public class MainActivity extends AppCompatActivity {
             }
 
             ConfigStore.Config cfg = new ConfigStore.Config(
-                vm.hookNative,
-                vm.hookJava,
+                vm.fileMonitorEnabled,
+                vm.fileNames,
                 new java.util.LinkedHashSet<>(vm.selectedPackages)
             );
             RootShell.Result r = ConfigStore.writeConfig(cfg);
             if (r.code == 0) {
-                Toast.makeText(this, "Saved to /data/adb/modules/sample/config.json", Toast.LENGTH_LONG).show();
+                Toast.makeText(this, "Saved to /data/adb/modules/appxray/config.json", Toast.LENGTH_LONG).show();
             } else {
                 String msg = (r.err != null && !r.err.trim().isEmpty()) ? r.err : r.out;
                 Toast.makeText(this, "Save failed: " + msg, Toast.LENGTH_LONG).show();
