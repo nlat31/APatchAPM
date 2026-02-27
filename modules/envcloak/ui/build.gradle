@@ -1,0 +1,8 @@
+// Top-level build file for EnvCloak settings UI (Java-only).
+
+plugins {
+    id 'com.android.application' version '8.3.2' apply false
+    // lifecycle 2.8.x is KMP; applying kotlin-android ensures Gradle selects Android variants (not *-desktop).
+    id 'org.jetbrains.kotlin.android' version '1.9.24' apply false
+}
+

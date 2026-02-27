@@ -5,18 +5,20 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.Arrays;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.Map;
-import java.util.Set;
 
 public class Hooker {
     // Backup methods for original implementations
     public static Method backupGetInstallerPackageName;
+    public static Method backupGetInstallSourceInfo;
     public static Method backupLoadClass;
 
     // Backup methods for InstallSourceInfo (Android 11+)
     public static Method backupGetInstallingPackageName;
     public static Method backupGetInitiatingPackageName;
+    public static Method backupGetOriginatingPackageName;
+    public static Method backupGetInitiatingPackageSigningInfo;
+    public static Method backupGetInstallingPackageSigningInfo;
 
     // Backup methods for Settings.*.getStringForUser
     public static Method backupSecureGetStringForUser;
@@ -38,12 +40,10 @@ public class Hooker {
     public static Method[] backupProcessImplStartAll;
     public static Method[] backupProcessManagerExecAll;
 
-    // ==== ImNotADeveloper: keys / overrides ====
-    private static final Set<String> SETTINGS_BANNED_KEYS = new HashSet<>(Arrays.asList(
-            "development_settings_enabled",
-            "adb_enabled",
-            "adb_wifi_enabled"
-    ));
+    // ==== ImNotADeveloper: split toggles (mirrors temp/ImNotADeveloper PrefKeys) ====
+    public static boolean HIDE_DEVELOPER_MODE = false;
+    public static boolean HIDE_USB_DEBUG = false;
+    public static boolean HIDE_WIRELESS_DEBUG = false;
 
     // Same overrides as reference project (used both for SystemProperties and getprop command masking)
     private static final Map<String, String> PROP_OVERRIDES = new HashMap<>();
@@ -55,6 +55,9 @@ public class Hooker {
         PROP_OVERRIDES.put("sys.usb.state", "mtp");
         PROP_OVERRIDES.put("init.svc.adbd", "stopped");
     }
+
+    // Runtime configurable (set from native). Default: Google Play Store.
+    public static String INSTALLER_PACKAGE = "com.android.vending";
 
     // Native callback to notify C++ when target class is loaded
     public static native void onClassLoaded(Class<?> clazz);
@@ -106,15 +109,82 @@ public class Hooker {
 
     // ===================== Existing hooks =====================
     public Object hookGetInstallerPackageName(Object[] args) {
-        return "com.android.vending";
+        return (INSTALLER_PACKAGE != null && !INSTALLER_PACKAGE.isEmpty())
+                ? INSTALLER_PACKAGE
+                : "com.android.vending";
+    }
+
+    public Object hookGetInstallSourceInfo(Object[] args) throws Throwable {
+        // Keep the original object shape. We spoof values by hooking getters on InstallSourceInfo.
+        return callBackup(backupGetInstallSourceInfo, args);
     }
 
     public Object hookGetInstallingPackageName(Object[] args) {
-        return "com.android.vending";
+        return (INSTALLER_PACKAGE != null && !INSTALLER_PACKAGE.isEmpty())
+                ? INSTALLER_PACKAGE
+                : "com.android.vending";
     }
 
     public Object hookGetInitiatingPackageName(Object[] args) {
-        return "com.android.vending";
+        return (INSTALLER_PACKAGE != null && !INSTALLER_PACKAGE.isEmpty())
+                ? INSTALLER_PACKAGE
+                : "com.android.vending";
+    }
+
+    public Object hookGetOriginatingPackageName(Object[] args) {
+        return (INSTALLER_PACKAGE != null && !INSTALLER_PACKAGE.isEmpty())
+                ? INSTALLER_PACKAGE
+                : "com.android.vending";
+    }
+
+    public Object hookGetUpdateOwnerPackageName(Object[] args) {
+        return (INSTALLER_PACKAGE != null && !INSTALLER_PACKAGE.isEmpty())
+                ? INSTALLER_PACKAGE
+                : "com.android.vending";
+    }
+
+    public Object hookGetPackageSource(Object[] args) {
+        // Android 14+: InstallSourceInfo.getPackageSource()
+        // Return "store" source if available; otherwise leave unspecified.
+        try {
+            Class<?> pi = Class.forName("android.content.pm.PackageInstaller");
+            return Integer.valueOf(pi.getField("PACKAGE_SOURCE_STORE").getInt(null));
+        } catch (Throwable ignored) {
+            try {
+                Class<?> pi = Class.forName("android.content.pm.PackageInstaller");
+                return Integer.valueOf(pi.getField("PACKAGE_SOURCE_UNSPECIFIED").getInt(null));
+            } catch (Throwable ignored2) {
+                return Integer.valueOf(0);
+            }
+        }
+    }
+
+    private static Object getInstallerSigningInfoOrNull() {
+        // Best-effort: avoid mismatches when apps cross-check signing info.
+        // If package visibility blocks querying installer package, return null.
+        try {
+            Class<?> at = Class.forName("android.app.ActivityThread");
+            Method curApp = at.getDeclaredMethod("currentApplication");
+            Object app = curApp.invoke(null);
+            if (!(app instanceof android.content.Context)) return null;
+            android.content.pm.PackageManager pm = ((android.content.Context) app).getPackageManager();
+            if (pm == null) return null;
+            String pkg = (INSTALLER_PACKAGE != null && !INSTALLER_PACKAGE.isEmpty()) ? INSTALLER_PACKAGE : "com.android.vending";
+            android.content.pm.PackageInfo pi = pm.getPackageInfo(pkg, android.content.pm.PackageManager.GET_SIGNING_CERTIFICATES);
+            return pi != null ? pi.signingInfo : null;
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    public Object hookGetInitiatingPackageSigningInfo(Object[] args) {
+        Object si = getInstallerSigningInfoOrNull();
+        return si != null ? si : null;
+    }
+
+    public Object hookGetInstallingPackageSigningInfo(Object[] args) {
+        Object si = getInstallerSigningInfoOrNull();
+        return si != null ? si : null;
     }
 
     public Object hookLoadClass(Object[] args) throws Throwable {
@@ -126,8 +196,10 @@ public class Hooker {
 
     private Object hookSettingsGetStringForUserInternal(Method backup, Object[] args) throws Throwable {
         String key = firstStringArg(args);
-        if (key != null && SETTINGS_BANNED_KEYS.contains(key)) {
-            return "0";
+        if (key != null) {
+            if (HIDE_DEVELOPER_MODE && "development_settings_enabled".equals(key)) return "0";
+            if (HIDE_USB_DEBUG && "adb_enabled".equals(key)) return "0";
+            if (HIDE_WIRELESS_DEBUG && "adb_wifi_enabled".equals(key)) return "0";
         }
         return callBackup(backup, args);
     }

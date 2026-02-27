@@ -80,11 +80,8 @@ namespace native_hook {
 
 // ========================================================================
 //  ImNotADeveloper: hide debug/usb related system properties (native)
+//  Note: hooks are installed only for user-selected target apps.
 // ========================================================================
-
-static bool is_app_uid() {
-    return getuid() >= 10000;
-}
 
 static const std::unordered_map<std::string_view, std::string_view> &prop_overrides() {
     static const std::unordered_map<std::string_view, std::string_view> k = {
@@ -102,7 +99,7 @@ static int (*orig___system_property_get)(const char *name, char *value) = nullpt
 static const prop_info *(*orig___system_property_find)(const char *name) = nullptr;
 
 static int hooked___system_property_get(const char *name, char *value) {
-    if (name && value && is_app_uid()) {
+    if (name && value) {
         auto it = prop_overrides().find(std::string_view{name});
         if (it != prop_overrides().end()) {
 #if defined(__BIONIC__)
@@ -118,7 +115,7 @@ static int hooked___system_property_get(const char *name, char *value) {
 }
 
 static const prop_info *hooked___system_property_find(const char *name) {
-    if (name && is_app_uid()) {
+    if (name) {
         auto it = prop_overrides().find(std::string_view{name});
         if (it != prop_overrides().end()) {
             // Hide existence for these keys.

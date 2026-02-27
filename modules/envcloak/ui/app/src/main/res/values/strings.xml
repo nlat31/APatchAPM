@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">EnvCloak</string>
+
+    <string name="tab_apps">Apps</string>
+    <string name="tab_installer_spoof">Installer</string>
+    <string name="tab_hide_dev">Hide Dev</string>
+
+    <string name="apply">Apply</string>
+    <string name="clear_selection">Clear</string>
+    <string name="show_system_apps">Show system apps</string>
+    <string name="root_required">Root permission is required to read/write /data/adb.</string>
+
+    <string name="apps_tip">Select target apps to inject. Settings are applied by process name prefix match.</string>
+
+    <string name="installer_title">Install source spoof</string>
+    <string name="installer_enable">Enable install source spoof</string>
+    <string name="installer_pkg_label">Installer package name</string>
+    <string name="installer_pkg_hint">e.g. com.android.vending</string>
+    <string name="installer_tip">When disabled, EnvCloak will not install any install-source related hooks.</string>
+
+    <string name="hide_dev_title">Hide developer options</string>
+    <string name="hide_dev_enable">Enable hide developer options</string>
+    <string name="hide_dev_tip">Split options follow ImNotADeveloper. When disabled, EnvCloak will not install any related hooks.</string>
+
+    <string name="hide_developer_mode">Hide developer mode</string>
+    <string name="hide_usb_debug">Hide USB debugging</string>
+    <string name="hide_wireless_debug">Hide wireless debugging</string>
+    <string name="hide_debug_properties">Hide debug properties</string>
+    <string name="hide_debug_properties_in_native">Hide debug properties in native</string>
+</resources>
+

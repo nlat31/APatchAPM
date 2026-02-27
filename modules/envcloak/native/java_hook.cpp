@@ -150,7 +150,14 @@ static void register_natives(JNIEnv *env, jclass hooker_cls) {
     }
 }
 
-void install_hooks(JNIEnv *env, const std::vector<uint8_t>& dex_data) {
+void install_hooks(JNIEnv *env,
+                   const std::vector<uint8_t>& dex_data,
+                   bool enable_installer_spoof,
+                   const std::string &installer_package,
+                   bool hide_developer_mode,
+                   bool hide_usb_debug,
+                   bool hide_wireless_debug,
+                   bool hide_debug_properties) {
     LOGI("Installing Java hooks...");
 
     if (dex_data.empty()) {
@@ -256,9 +263,47 @@ void install_hooks(JNIEnv *env, const std::vector<uint8_t>& dex_data) {
         return true;
     };
 
+    // Apply runtime config (before installing any hooks)
+    // - installer package for spoofing
+    // - feature switches are handled by conditional installation below
+
+    // Set Hooker.INSTALLER_PACKAGE (static) if present
+    if (!installer_package.empty()) {
+        jfieldID fid = env->GetStaticFieldID(hooker_class_ref, "INSTALLER_PACKAGE", "Ljava/lang/String;");
+        if (fid) {
+            jstring jv = env->NewStringUTF(installer_package.c_str());
+            if (jv) {
+                env->SetStaticObjectField(hooker_class_ref, fid, jv);
+                env->DeleteLocalRef(jv);
+            } else {
+                env->ExceptionClear();
+            }
+        } else {
+            env->ExceptionClear();
+        }
+    }
+
+    // Set split flags on Hooker (best-effort; hook methods also guarded by conditional installation below)
+    {
+        jfieldID fid = env->GetStaticFieldID(hooker_class_ref, "HIDE_DEVELOPER_MODE", "Z");
+        if (fid) env->SetStaticBooleanField(hooker_class_ref, fid, hide_developer_mode ? JNI_TRUE : JNI_FALSE);
+        else env->ExceptionClear();
+    }
+    {
+        jfieldID fid = env->GetStaticFieldID(hooker_class_ref, "HIDE_USB_DEBUG", "Z");
+        if (fid) env->SetStaticBooleanField(hooker_class_ref, fid, hide_usb_debug ? JNI_TRUE : JNI_FALSE);
+        else env->ExceptionClear();
+    }
+    {
+        jfieldID fid = env->GetStaticFieldID(hooker_class_ref, "HIDE_WIRELESS_DEBUG", "Z");
+        if (fid) env->SetStaticBooleanField(hooker_class_ref, fid, hide_wireless_debug ? JNI_TRUE : JNI_FALSE);
+        else env->ExceptionClear();
+    }
+
     // ================================================================
     // ImNotADeveloper: Settings.*.getStringForUser -> hide dev/adb keys
     // ================================================================
+    if (hide_developer_mode || hide_usb_debug || hide_wireless_debug) {
     struct SettingsHookItem {
         const char *cls;
         const char *hook_name;
@@ -296,10 +341,14 @@ void install_hooks(JNIEnv *env, const std::vector<uint8_t>& dex_data) {
             }
         }
     }
+    } else {
+        LOGI("Hide-settings disabled: skip Settings hooks");
+    }
 
     // ================================================================
     // ImNotADeveloper: android.os.SystemProperties native_get* -> override props
     // ================================================================
+    if (hide_debug_properties) {
     jclass sp_cls = find_class(env, "android/os/SystemProperties");
     if (sp_cls) {
         struct SPItem {
@@ -334,10 +383,14 @@ void install_hooks(JNIEnv *env, const std::vector<uint8_t>& dex_data) {
         env->ExceptionClear();
         LOGW("android/os/SystemProperties not found");
     }
+    } else {
+        LOGI("Hide-debug-properties disabled: skip SystemProperties hooks");
+    }
 
     // ================================================================
     // ImNotADeveloper: ProcessImpl.start / ProcessManager.exec -> mask getprop keys
     // ================================================================
+    if (hide_debug_properties) {
     auto hook_all_methods_by_name_and_store = [&](jclass target_cls,
                                                  const char *target_cls_name,
                                                  const char *target_method_name,
@@ -486,10 +539,14 @@ void install_hooks(JNIEnv *env, const std::vector<uint8_t>& dex_data) {
     } else {
         env->ExceptionClear();
     }
+    } else {
+        LOGI("Hide-debug-properties disabled: skip Process hooks");
+    }
 
     // ================================================================
     // Hook: ApplicationPackageManager.getInstallerPackageName
     // ================================================================
+    if (enable_installer_spoof) {
     jclass pm_cls = find_class(env, "android/app/ApplicationPackageManager");
     if (!pm_cls) {
         LOGW("android/app/ApplicationPackageManager not found (this is unexpected)");
@@ -515,11 +572,40 @@ void install_hooks(JNIEnv *env, const std::vector<uint8_t>& dex_data) {
                 LOGE("Failed to hook ApplicationPackageManager.getInstallerPackageName");
             }
         }
+
+        // Also hook ApplicationPackageManager.getInstallSourceInfo(String) (Android 11+)
+        jmethodID target_gisi_mid = find_method(env, pm_cls, "getInstallSourceInfo", "(Ljava/lang/String;)Landroid/content/pm/InstallSourceInfo;");
+        jobject target_gisi_method = to_reflected_method(env, pm_cls, target_gisi_mid, false);
+
+        jmethodID hook_gisi_mid = find_method(env, hooker_class_ref, "hookGetInstallSourceInfo", "([Ljava/lang/Object;)Ljava/lang/Object;", false);
+        jobject hook_gisi_method = to_reflected_method(env, hooker_class_ref, hook_gisi_mid, false);
+
+        if (target_gisi_method && hook_gisi_method) {
+            jobject backup = lsplant::Hook(env, target_gisi_method, hooker_inst_ref, hook_gisi_method);
+            if (backup) {
+                LOGI("Successfully hooked ApplicationPackageManager.getInstallSourceInfo");
+                jfieldID backup_field = env->GetStaticFieldID(hooker_class_ref, "backupGetInstallSourceInfo", "Ljava/lang/reflect/Method;");
+                if (backup_field) {
+                    env->SetStaticObjectField(hooker_class_ref, backup_field, backup);
+                } else {
+                    env->ExceptionClear();
+                    LOGW("Field backupGetInstallSourceInfo not found");
+                }
+            } else {
+                LOGE("Failed to hook ApplicationPackageManager.getInstallSourceInfo");
+            }
+        } else {
+            env->ExceptionClear();
+        }
+    }
+    } else {
+        LOGI("Installer-spoof disabled: skip getInstallerPackageName hook");
     }
 
     // ================================================================
     // Hook: InstallSourceInfo (Android 11+)
     // ================================================================
+    if (enable_installer_spoof) {
     jclass isi_cls = find_class(env, "android/content/pm/InstallSourceInfo");
     if (isi_cls) {
         LOGI("Found InstallSourceInfo class, attempting to hook getters");
@@ -549,9 +635,90 @@ void install_hooks(JNIEnv *env, const std::vector<uint8_t>& dex_data) {
                 LOGI("Successfully hooked InstallSourceInfo.getInitiatingPackageName");
             }
         }
+
+        // getOriginatingPackageName()
+        jmethodID target_opn_mid = find_method(env, isi_cls, "getOriginatingPackageName", "()Ljava/lang/String;");
+        jobject target_opn_method = to_reflected_method(env, isi_cls, target_opn_mid, false);
+        jmethodID hook_opn_mid = find_method(env, hooker_class_ref, "hookGetOriginatingPackageName", "([Ljava/lang/Object;)Ljava/lang/Object;", false);
+        jobject hook_opn_method = to_reflected_method(env, hooker_class_ref, hook_opn_mid, false);
+        if (target_opn_method && hook_opn_method) {
+            jobject backup = lsplant::Hook(env, target_opn_method, hooker_inst_ref, hook_opn_method);
+            if (backup) {
+                LOGI("Successfully hooked InstallSourceInfo.getOriginatingPackageName");
+                jfieldID backup_field = env->GetStaticFieldID(hooker_class_ref, "backupGetOriginatingPackageName", "Ljava/lang/reflect/Method;");
+                if (backup_field) env->SetStaticObjectField(hooker_class_ref, backup_field, backup);
+                else env->ExceptionClear();
+            }
+        } else {
+            env->ExceptionClear();
+        }
+
+        // getUpdateOwnerPackageName() (Android 12+)
+        jmethodID target_uopn_mid = find_method(env, isi_cls, "getUpdateOwnerPackageName", "()Ljava/lang/String;");
+        jobject target_uopn_method = to_reflected_method(env, isi_cls, target_uopn_mid, false);
+        jmethodID hook_uopn_mid = find_method(env, hooker_class_ref, "hookGetUpdateOwnerPackageName", "([Ljava/lang/Object;)Ljava/lang/Object;", false);
+        jobject hook_uopn_method = to_reflected_method(env, hooker_class_ref, hook_uopn_mid, false);
+        if (target_uopn_method && hook_uopn_method) {
+            jobject backup = lsplant::Hook(env, target_uopn_method, hooker_inst_ref, hook_uopn_method);
+            if (backup) {
+                LOGI("Successfully hooked InstallSourceInfo.getUpdateOwnerPackageName");
+            }
+        } else {
+            env->ExceptionClear();
+        }
+
+        // getPackageSource() (Android 14+)
+        jmethodID target_ps_mid = find_method(env, isi_cls, "getPackageSource", "()I");
+        jobject target_ps_method = to_reflected_method(env, isi_cls, target_ps_mid, false);
+        jmethodID hook_ps_mid = find_method(env, hooker_class_ref, "hookGetPackageSource", "([Ljava/lang/Object;)Ljava/lang/Object;", false);
+        jobject hook_ps_method = to_reflected_method(env, hooker_class_ref, hook_ps_mid, false);
+        if (target_ps_method && hook_ps_method) {
+            jobject backup = lsplant::Hook(env, target_ps_method, hooker_inst_ref, hook_ps_method);
+            if (backup) {
+                LOGI("Successfully hooked InstallSourceInfo.getPackageSource");
+            }
+        } else {
+            env->ExceptionClear();
+        }
+
+        // getInitiatingPackageSigningInfo() / getInstallingPackageSigningInfo()
+        jmethodID target_ips_mid = find_method(env, isi_cls, "getInitiatingPackageSigningInfo", "()Landroid/content/pm/SigningInfo;");
+        jobject target_ips_method = to_reflected_method(env, isi_cls, target_ips_mid, false);
+        jmethodID hook_ips_mid = find_method(env, hooker_class_ref, "hookGetInitiatingPackageSigningInfo", "([Ljava/lang/Object;)Ljava/lang/Object;", false);
+        jobject hook_ips_method = to_reflected_method(env, hooker_class_ref, hook_ips_mid, false);
+        if (target_ips_method && hook_ips_method) {
+            jobject backup = lsplant::Hook(env, target_ips_method, hooker_inst_ref, hook_ips_method);
+            if (backup) {
+                LOGI("Successfully hooked InstallSourceInfo.getInitiatingPackageSigningInfo");
+                jfieldID backup_field = env->GetStaticFieldID(hooker_class_ref, "backupGetInitiatingPackageSigningInfo", "Ljava/lang/reflect/Method;");
+                if (backup_field) env->SetStaticObjectField(hooker_class_ref, backup_field, backup);
+                else env->ExceptionClear();
+            }
+        } else {
+            env->ExceptionClear();
+        }
+
+        jmethodID target_igs_mid = find_method(env, isi_cls, "getInstallingPackageSigningInfo", "()Landroid/content/pm/SigningInfo;");
+        jobject target_igs_method = to_reflected_method(env, isi_cls, target_igs_mid, false);
+        jmethodID hook_igs_mid = find_method(env, hooker_class_ref, "hookGetInstallingPackageSigningInfo", "([Ljava/lang/Object;)Ljava/lang/Object;", false);
+        jobject hook_igs_method = to_reflected_method(env, hooker_class_ref, hook_igs_mid, false);
+        if (target_igs_method && hook_igs_method) {
+            jobject backup = lsplant::Hook(env, target_igs_method, hooker_inst_ref, hook_igs_method);
+            if (backup) {
+                LOGI("Successfully hooked InstallSourceInfo.getInstallingPackageSigningInfo");
+                jfieldID backup_field = env->GetStaticFieldID(hooker_class_ref, "backupGetInstallingPackageSigningInfo", "Ljava/lang/reflect/Method;");
+                if (backup_field) env->SetStaticObjectField(hooker_class_ref, backup_field, backup);
+                else env->ExceptionClear();
+            }
+        } else {
+            env->ExceptionClear();
+        }
     } else {
         env->ExceptionClear();
         LOGI("InstallSourceInfo class not found (Android < 11?)");
+    }
+    } else {
+        LOGI("Installer-spoof disabled: skip InstallSourceInfo hooks");
     }
 
     LOGI("Java hooks installation complete");
