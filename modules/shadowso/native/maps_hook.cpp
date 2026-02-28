@@ -420,9 +420,13 @@ static bool hook_func(const char *sym, void *replacement, T *orig_out) {
 
 } // namespace
 
-bool install(const std::string &package_name) {
+bool install(const std::string &package_name, const std::string &app_data_dir) {
     if (package_name.empty()) {
         LOGE("[%s][maps] install failed: empty package", ZMOD_ID);
+        return false;
+    }
+    if (app_data_dir.empty()) {
+        LOGE("[%s][maps] install failed: empty app_data_dir", ZMOD_ID);
         return false;
     }
     if (!g_pkg.empty()) {
@@ -431,7 +435,9 @@ bool install(const std::string &package_name) {
     }
 
     g_pkg = package_name;
-    g_temp_dir = std::string("/data/data/") + g_pkg + "/temp";
+    g_temp_dir = app_data_dir;
+    if (!g_temp_dir.empty() && g_temp_dir.back() == '/') g_temp_dir.pop_back();
+    g_temp_dir += "/temp";
     g_temp_maps = g_temp_dir + "/maps";
 
     LOGI("[%s][maps] installing open/openat/fopen hooks (pkg=%s)", ZMOD_ID, g_pkg.c_str());
@@ -439,11 +445,24 @@ bool install(const std::string &package_name) {
     ok &= hook_func("openat", (void *)new_openat, &old_openat);
     ok &= hook_func("open", (void *)new_open, &old_open);
     ok &= hook_func("fopen", (void *)new_fopen, &old_fopen);
-    ok &= hook_func("fopen64", (void *)new_fopen64, &old_fopen64);
     if (!ok) {
         LOGE("[%s][maps] install failed; abort maps hook", ZMOD_ID);
         return false;
     }
+
+    // fopen64 is optional on modern Android (often an alias of fopen).
+    void *fopen_target = resolve_sym("fopen");
+    void *fopen64_target = resolve_sym("fopen64");
+    if (!fopen64_target || fopen64_target == fopen_target) {
+        old_fopen64 = old_fopen;
+        LOGI("[%s][maps] fopen64 is missing/alias; using fopen instead", ZMOD_ID);
+    } else {
+        if (!hook_func("fopen64", (void *)new_fopen64, &old_fopen64)) {
+            old_fopen64 = old_fopen;
+            LOGW("[%s][maps] fopen64 hook failed; fallback to fopen", ZMOD_ID);
+        }
+    }
+
     LOGI("[%s][maps] install ok (temp=%s)", ZMOD_ID, g_temp_maps.c_str());
     return true;
 }

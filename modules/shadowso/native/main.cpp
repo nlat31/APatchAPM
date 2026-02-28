@@ -165,7 +165,13 @@ static const ModuleConfig &load_config_cached() {
     struct stat st {};
     const std::string path = config_path();
     if (stat(path.c_str(), &st) != 0) {
-        // No config -> default: disable for all apps.
+        // After postAppSpecialize the process UID may become the target app UID,
+        // which typically cannot access /data/adb. If we already loaded config
+        // earlier (while still privileged), keep the cached config instead of
+        // falling back to "disabled".
+        if (cfg.loaded) return cfg;
+
+        // No config (or can't access it) -> default: disable for all apps.
         cfg = ModuleConfig{};
         cfg.loaded = true;
         return cfg;
@@ -280,9 +286,11 @@ public:
             // Hook file open as early as possible (before other code that may read /proc/self/maps).
             const char *data_dir = env_->GetStringUTFChars(args->app_data_dir, nullptr);
             std::string pkg;
+            std::string app_data_dir;
             if (data_dir) {
                 std::string s = data_dir;
                 if (!s.empty() && s.back() == '/') s.pop_back();
+                app_data_dir = s;
                 size_t slash = s.find_last_of('/');
                 if (slash != std::string::npos && slash + 1 < s.size()) {
                     pkg = s.substr(slash + 1);
@@ -290,7 +298,7 @@ public:
                 env_->ReleaseStringUTFChars(args->app_data_dir, data_dir);
             }
             if (!pkg.empty()) {
-                if (!sample::maps_hook::install(pkg)) {
+                if (!sample::maps_hook::install(pkg, app_data_dir)) {
                     LOGE("[%s][core] maps_hook install failed; stop", ZMOD_ID);
                     return;
                 }
