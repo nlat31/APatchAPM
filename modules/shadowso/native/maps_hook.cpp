@@ -6,6 +6,8 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <string>
+#include <unordered_map>
 
 #include <dlfcn.h>
 #include <fcntl.h>
