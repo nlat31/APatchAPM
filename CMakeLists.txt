@@ -97,6 +97,20 @@ else()
             "Please run: ./setup.sh")
 endif()
 
+# --- CSOLoader (custom linker, static lib) ---
+set(CSOLOADER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/external/CSOLoader)
+if(EXISTS ${CSOLOADER_DIR}/CMakeLists.txt)
+    add_subdirectory(${CSOLOADER_DIR} csoloader_build)
+    message(STATUS "CSOLoader: Found at ${CSOLOADER_DIR}")
+    # Ensure static lib is PIC so it can be linked into our shared module.
+    if(TARGET csoloader)
+        set_property(TARGET csoloader PROPERTY POSITION_INDEPENDENT_CODE ON)
+    endif()
+else()
+    message(FATAL_ERROR "CSOLoader not found at ${CSOLOADER_DIR}\n"
+            "Please run: ./setup.sh")
+endif()
+
 # ==================== Zygisk 模块库 ====================
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/ZygiskModule.cmake)

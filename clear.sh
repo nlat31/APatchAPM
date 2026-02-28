@@ -11,6 +11,8 @@ Usage:
 What it clears (default):
   - build/            (CMake/Ninja build directories)
   - out/              (packaging output, zips, staged module dir)
+  - modules/*/ui/**/build/   (Gradle intermediates/outputs)
+  - modules/*/ui/.gradle/    (Gradle cache per module UI)
 
 With --all, also clears:
   - tools/ninja-*/    (downloaded portable ninja)
@@ -69,6 +71,26 @@ rm_path() {
 say "project: $ROOT_DIR"
 rm_path "build"
 rm_path "out"
+
+# Clear UI (Gradle) build outputs for each module that has ui/
+shopt -s nullglob
+for ui_dir in "$ROOT_DIR"/modules/*/ui; do
+  [[ -d "$ui_dir" ]] || continue
+  rel="${ui_dir#$ROOT_DIR/}"
+
+  rm_path "${rel}/build"
+  rm_path "${rel}/.gradle"
+  rm_path "${rel}/app/build"
+
+  # If externalNativeBuild is enabled in a UI module, these may exist.
+  rm_path "${rel}/.cxx"
+  rm_path "${rel}/app/.cxx"
+  rm_path "${rel}/.externalNativeBuild"
+  rm_path "${rel}/app/.externalNativeBuild"
+  rm_path "${rel}/externalNativeBuild"
+  rm_path "${rel}/app/externalNativeBuild"
+done
+shopt -u nullglob
 
 if [[ "$ALL" -eq 1 ]]; then
   # Remove downloaded ninja bundles but keep tools/ for future use.

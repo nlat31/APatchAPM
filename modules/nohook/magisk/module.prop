@@ -1,0 +1,7 @@
+id=sample
+name=Sample (Template)
+version=v1.0.0
+versionCode=1
+author=developer
+description=Template Zygisk module (ActivityThread.main + android_dlopen_ext logging)
+

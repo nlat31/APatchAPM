@@ -9,6 +9,7 @@ set -euo pipefail
 #   - lsplant     (ART Java hook 框架)
 #   - frida-gum   (Frida GUM DevKit, static lib)
 #   - zygisk.hpp  (Zygisk Module API 头文件)
+#   - CSOLoader   (Custom linker, static lib)
 # ================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,6 +21,7 @@ LSPLANT_REPO="https://github.com/LSPosed/LSPlant.git"
 ZYGISK_HPP_URL="https://raw.githubusercontent.com/topjohnwu/zygisk-module-sample/master/module/jni/zygisk.hpp"
 FRIDA_GUM_VERSION="17.7.3"
 FRIDA_MIRROR_BASE="https://sourceforge.net/projects/frida.mirror/files"
+CSOLOADER_REPO="https://github.com/ThePedroo/CSOLoader.git"
 
 # 颜色
 RED='\033[0;31m'
@@ -63,7 +65,7 @@ mkdir -p "${EXTERNAL_DIR}"
 
 # ==================== 1. Dobby ====================
 DOBBY_DIR="${EXTERNAL_DIR}/dobby"
-step "[1/4] Dobby (Native Hook Framework)"
+step "[1/5] Dobby (Native Hook Framework)"
 
 if [ -d "${DOBBY_DIR}/.git" ]; then
     info "Dobby already exists, pulling latest..."
@@ -254,7 +256,7 @@ patch_dobby_android
 
 # ==================== 2. lsplant ====================
 LSPLANT_DIR="${EXTERNAL_DIR}/lsplant"
-step "[2/4] lsplant (ART Java Hook Framework)"
+step "[2/5] lsplant (ART Java Hook Framework)"
 
 if [ -d "${LSPLANT_DIR}/.git" ]; then
     info "lsplant already exists, pulling latest..."
@@ -300,7 +302,7 @@ fi
 FRIDA_DIR="${EXTERNAL_DIR}/frida-gum"
 FRIDA_INCLUDE_DIR="${FRIDA_DIR}/include"
 FRIDA_LIB_DIR="${FRIDA_DIR}/lib"
-step "[3/4] frida-gum (DevKit ${FRIDA_GUM_VERSION})"
+step "[3/5] frida-gum (DevKit ${FRIDA_GUM_VERSION})"
 
 mkdir -p "${FRIDA_INCLUDE_DIR}" "${FRIDA_LIB_DIR}"
 
@@ -371,7 +373,7 @@ extract_devkit_one "x86_64" "android-x86_64"
 # ==================== 4. zygisk.hpp ====================
 ZYGISK_DIR="${EXTERNAL_DIR}/zygisk"
 ZYGISK_HPP="${ZYGISK_DIR}/zygisk.hpp"
-step "[4/4] zygisk.hpp (Zygisk Module API Header)"
+step "[4/5] zygisk.hpp (Zygisk Module API Header)"
 
 mkdir -p "${ZYGISK_DIR}"
 
@@ -399,6 +401,44 @@ else
     fi
 fi
 
+# ==================== 5. CSOLoader ====================
+CSOLOADER_DIR="${EXTERNAL_DIR}/CSOLoader"
+step "[5/5] CSOLoader (Custom Linker)"
+
+if [ -d "${CSOLOADER_DIR}/.git" ]; then
+    info "CSOLoader already exists, pulling latest..."
+    cd "${CSOLOADER_DIR}"
+    if git fetch --depth 1 origin; then
+        if git rev-parse --verify --quiet origin/HEAD >/dev/null; then
+            git reset --hard origin/HEAD
+        else
+            HEAD_BRANCH="$(git remote show origin 2>/dev/null | grep 'HEAD branch' | awk '{print $NF}' || true)"
+            if [ -n "${HEAD_BRANCH}" ] && git rev-parse --verify --quiet "origin/${HEAD_BRANCH}" >/dev/null; then
+                git reset --hard "origin/${HEAD_BRANCH}"
+            else
+                warn "Unable to resolve origin HEAD; keeping current CSOLoader checkout"
+            fi
+        fi
+    else
+        warn "Network fetch failed; keeping current CSOLoader checkout"
+    fi
+    cd "${SCRIPT_DIR}"
+else
+    if [ -d "${CSOLOADER_DIR}" ]; then
+        warn "Removing incomplete CSOLoader directory..."
+        rm -rf "${CSOLOADER_DIR}"
+    fi
+    info "Cloning CSOLoader (shallow)..."
+    git clone --depth 1 "${CSOLOADER_REPO}" "${CSOLOADER_DIR}"
+fi
+
+# 验证
+if [ -f "${CSOLOADER_DIR}/CMakeLists.txt" ]; then
+    info "CSOLoader OK: ${CSOLOADER_DIR}"
+else
+    error "CSOLoader clone failed - CMakeLists.txt not found"
+fi
+
 # ==================== 完成 ====================
 echo ""
 echo -e "${GREEN}================================================================${NC}"
@@ -409,12 +449,14 @@ echo "  Dobby:       ${DOBBY_DIR}"
 echo "  lsplant:     ${LSPLANT_DIR}"
 echo "  frida-gum:   ${FRIDA_DIR}"
 echo "  zygisk.hpp:  ${ZYGISK_HPP}"
+echo "  CSOLoader:   ${CSOLOADER_DIR}"
 echo ""
 
 # 显示版本信息
 echo "  Versions:"
 cd "${DOBBY_DIR}" && echo "    Dobby:   $(git log -1 --format='%h %s' 2>/dev/null || echo 'unknown')" && cd "${SCRIPT_DIR}"
 cd "${LSPLANT_DIR}" && echo "    lsplant: $(git log -1 --format='%h %s' 2>/dev/null || echo 'unknown')" && cd "${SCRIPT_DIR}"
+cd "${CSOLOADER_DIR}" && echo "    CSOLoader: $(git log -1 --format='%h %s' 2>/dev/null || echo 'unknown')" && cd "${SCRIPT_DIR}"
 echo "    frida-gum: ${FRIDA_GUM_VERSION}"
 echo ""
 echo -e "  Run ${CYAN}./build.sh${NC} to build the Zygisk module."

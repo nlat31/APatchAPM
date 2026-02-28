@@ -37,6 +37,7 @@ DEPS_OK=true
 [ -f "${PROJECT_DIR}/external/dobby/CMakeLists.txt" ] || DEPS_OK=false
 [ -f "${PROJECT_DIR}/external/lsplant/lsplant/src/main/jni/CMakeLists.txt" ] || DEPS_OK=false
 [ -f "${PROJECT_DIR}/external/zygisk/zygisk.hpp" ] || DEPS_OK=false
+[ -f "${PROJECT_DIR}/external/CSOLoader/CMakeLists.txt" ] || DEPS_OK=false
 
 if [ "${DEPS_OK}" = false ]; then
     info "Dependencies missing - running setup.sh ..."
@@ -44,6 +45,7 @@ if [ "${DEPS_OK}" = false ]; then
     [ -f "${PROJECT_DIR}/external/dobby/CMakeLists.txt" ] || error "Dobby setup failed"
     [ -f "${PROJECT_DIR}/external/lsplant/lsplant/src/main/jni/CMakeLists.txt" ] || error "lsplant setup failed"
     [ -f "${PROJECT_DIR}/external/zygisk/zygisk.hpp" ] || error "zygisk.hpp setup failed"
+    [ -f "${PROJECT_DIR}/external/CSOLoader/CMakeLists.txt" ] || error "CSOLoader setup failed"
 else
     info "All dependencies present"
 fi
