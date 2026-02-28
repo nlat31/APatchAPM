@@ -6,12 +6,17 @@
 #include <cstdint>
 #include <cstring>
 #include <cerrno>
+#include <dlfcn.h>
 #include <link.h>
 #include <mutex>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <atomic>
+#include <signal.h>
+#include <ucontext.h>
+#include <sys/mman.h>
 
 #include <dobby.h>
 
@@ -61,6 +66,125 @@ static uintptr_t g_linker_base = 0;
 
 // Keep CSOLoader instances alive for the entire process lifetime.
 static std::vector<csoloader *> g_shadow_libs;
+
+struct ShadowBound {
+    uintptr_t shadow_start;
+    uintptr_t shadow_end;
+    uintptr_t orig_base;
+};
+static ShadowBound g_shadow_bounds[32];
+static std::atomic<size_t> g_shadow_bounds_count{0};
+static struct sigaction old_sa_segv;
+
+static void segv_handler(int sig, siginfo_t *info, void *context) {
+    ucontext_t *uc = (ucontext_t *)context;
+    
+#if defined(__aarch64__)
+    uintptr_t fault_pc = uc->uc_mcontext.pc;
+#elif defined(__arm__)
+    uintptr_t fault_pc = uc->uc_mcontext.arm_pc;
+#elif defined(__i386__)
+    uintptr_t fault_pc = uc->uc_mcontext.gregs[REG_EIP];
+#elif defined(__x86_64__)
+    uintptr_t fault_pc = uc->uc_mcontext.gregs[REG_RIP];
+#else
+    uintptr_t fault_pc = 0;
+#endif
+
+    if (fault_pc != 0) {
+        size_t count = g_shadow_bounds_count.load(std::memory_order_acquire);
+        for (size_t i = 0; i < count; i++) {
+            if (fault_pc >= g_shadow_bounds[i].shadow_start && fault_pc < g_shadow_bounds[i].shadow_end) {
+                uintptr_t offset = fault_pc - g_shadow_bounds[i].shadow_start;
+                uintptr_t real_pc = g_shadow_bounds[i].orig_base + offset;
+                
+#if defined(__aarch64__)
+                uc->uc_mcontext.pc = real_pc;
+#elif defined(__arm__)
+                uc->uc_mcontext.arm_pc = real_pc;
+#elif defined(__i386__)
+                uc->uc_mcontext.gregs[REG_EIP] = real_pc;
+#elif defined(__x86_64__)
+                uc->uc_mcontext.gregs[REG_RIP] = real_pc;
+#endif
+                return; // Resume execution at the real library
+            }
+        }
+    }
+
+    // Not handled by us, call original handler
+    if (old_sa_segv.sa_flags & SA_SIGINFO) {
+        if (old_sa_segv.sa_sigaction) {
+            old_sa_segv.sa_sigaction(sig, info, context);
+        } else {
+            struct sigaction dfl;
+            sigaction(SIGSEGV, nullptr, &dfl);
+            dfl.sa_handler = SIG_DFL;
+            sigaction(SIGSEGV, &dfl, nullptr);
+        }
+    } else {
+        if (old_sa_segv.sa_handler == SIG_DFL || old_sa_segv.sa_handler == SIG_IGN) {
+            struct sigaction dfl;
+            sigaction(SIGSEGV, nullptr, &dfl);
+            dfl.sa_handler = SIG_DFL;
+            sigaction(SIGSEGV, &dfl, nullptr);
+        } else if (old_sa_segv.sa_handler) {
+            old_sa_segv.sa_handler(sig);
+        }
+    }
+}
+
+static void install_segv_handler() {
+    static bool installed = false;
+    if (installed) return;
+    struct sigaction sa;
+    std::memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = segv_handler;
+    sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    sigaction(SIGSEGV, &sa, &old_sa_segv);
+    installed = true;
+}
+
+using sigaction_t = int (*)(int, const struct sigaction*, struct sigaction*);
+static sigaction_t orig_sigaction = nullptr;
+static sigaction_t orig_sigaction64 = nullptr;
+
+static int hooked_sigaction(int signum, const struct sigaction *act, struct sigaction *oldact) {
+    if (signum == SIGSEGV) {
+        if (oldact) {
+            *oldact = old_sa_segv;
+        }
+        if (act) {
+            old_sa_segv = *act;
+        }
+        return 0; // successfully swallowed
+    }
+    return orig_sigaction ? orig_sigaction(signum, act, oldact) : -1;
+}
+
+static int hooked_sigaction64(int signum, const void *act, void *oldact) {
+    if (signum == SIGSEGV) {
+        if (oldact) {
+            std::memcpy(oldact, &old_sa_segv, sizeof(old_sa_segv)); // Approximation, layout matches usually
+        }
+        if (act) {
+            std::memcpy(&old_sa_segv, act, sizeof(old_sa_segv));
+        }
+        return 0; // successfully swallowed
+    }
+    return orig_sigaction64 ? orig_sigaction64(signum, (const struct sigaction*)act, (struct sigaction*)oldact) : -1;
+}
+
+static void install_sigaction_hook() {
+    void *sa = dlsym(RTLD_DEFAULT, "sigaction");
+    if (sa) {
+        DobbyHook(sa, (void*)hooked_sigaction, (void**)&orig_sigaction);
+    }
+    void *sa64 = dlsym(RTLD_DEFAULT, "sigaction64");
+    if (sa64) {
+        DobbyHook(sa64, (void*)hooked_sigaction64, (void**)&orig_sigaction64);
+    }
+}
 
 static std::string to_lower(std::string s) {
     for (auto &ch : s) ch = (char)std::tolower((unsigned char)ch);
@@ -191,8 +315,14 @@ static bool shadow_load_path_locked(const std::string &target_lower, const std::
 
     auto *lib = new csoloader();
     std::memset(lib, 0, sizeof(*lib));
-    if (!csoloader_load(lib, path.c_str())) {
-        LOGE("[%s][shadow] csoloader_load failed for %s (path=%s)", ZMOD_ID, target_lower.c_str(), path.c_str());
+    
+    // Always use map_only mode. The purpose is purely to create a memory decoy to
+    // spoof anti-hook memory checks, not to actually execute the shadow library.
+    // By skipping constructors, we prevent SIGTRAP/crashes from system libraries (e.g. libc.so).
+    bool map_only = true;
+
+    if (!csoloader_load_ext(lib, path.c_str(), map_only)) {
+        LOGE("[%s][shadow] csoloader_load_ext failed for %s (path=%s, map_only=%d)", ZMOD_ID, target_lower.c_str(), path.c_str(), map_only);
         delete lib;
         return false;
     }
@@ -220,6 +350,22 @@ static bool shadow_load_path_locked(const std::string &target_lower, const std::
     // Fill original info if missing.
     if (info.orig_path.empty()) {
         info.orig_path = path;
+    }
+
+    if (map_only && info.orig_base != 0 && info.shadow_base != 0) {
+        size_t idx = g_shadow_bounds_count.load(std::memory_order_relaxed);
+        if (idx < 32) {
+            g_shadow_bounds[idx] = {
+                info.shadow_base,
+                info.shadow_base + info.shadow_size,
+                info.orig_base
+            };
+            g_shadow_bounds_count.store(idx + 1, std::memory_order_release);
+        }
+        
+        // Strip PROT_EXEC to force a SIGSEGV when executed.
+        // We do this to catch execution attempts and redirect them to the real library.
+        // mprotect(reinterpret_cast<void*>(info.shadow_base), info.shadow_size, PROT_READ);
     }
 
     LOGI("[%s][shadow] loaded %s (orig=%s base=0x%lx size=0x%zx, shadow=%s base=0x%lx size=0x%zx)",
@@ -360,6 +506,10 @@ bool initialize(const std::vector<std::string> &so_names) {
 
     // Snapshot loaded modules once, right after fork. Do not read /proc/self/maps.
     (void)snapshot_targets_from_dl_iterate_phdr_locked();
+
+    // Install SEGV handler to catch map_only decoy execution
+    install_segv_handler();
+    install_sigaction_hook();
 
     // Shadow-load all targets we enumerated in the snapshot.
     std::unordered_set<std::string> pending = g_targets;

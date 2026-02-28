@@ -240,10 +240,10 @@ public:
         this->env_ = env;
         LOGI("onLoad(%s): pid=%d uid=%d", ZMOD_ID, getpid(), getuid());
 
-        // Load DEX in Zygote process so it's available to all forked apps
-        if (g_dex_data.empty()) {
-            load_dex_data();
-        }
+        // Java hook and dex loading is currently disabled.
+        // if (g_dex_data.empty()) {
+        //     load_dex_data();
+        // }
     }
 
     void preAppSpecialize(zygisk::AppSpecializeArgs *args) override {
@@ -258,7 +258,8 @@ public:
         should_inject_ = matches_any_package(proc, cfg.packages);
         hooks_enabled_ = should_inject_ && cfg.enabled;
         hook_native_ = hooks_enabled_ && cfg.hook_native;
-        hook_java_ = hooks_enabled_ && cfg.hook_java;
+        // Force disable Java hooks to prevent triggering anti-cheat Java exception
+        hook_java_ = false; // hooks_enabled_ && cfg.hook_java;
         LOGI("[%s][core] match=%d enabled=%d hook_native=%d hook_java=%d",
              ZMOD_ID, should_inject_ ? 1 : 0, cfg.enabled ? 1 : 0, hook_native_ ? 1 : 0, hook_java_ ? 1 : 0);
 
