@@ -11,6 +11,7 @@
 
 #include <dlfcn.h>
 #include <fcntl.h>
+#include <sys/mman.h>
 #include <sys/syscall.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -33,8 +34,6 @@ namespace maps_hook {
 namespace {
 
 static std::string g_pkg;
-static std::string g_temp_dir;
-static std::string g_temp_maps;
 
 using openat_real_t = int (*)(int, const char *, int, mode_t);
 using open_real_t = int (*)(const char *, int, mode_t);
@@ -57,86 +56,63 @@ static inline ssize_t raw_read(int fd, void *buf, size_t n) {
 static inline ssize_t raw_write(int fd, const void *buf, size_t n) {
     return (ssize_t)syscall(SYS_write, fd, buf, n);
 }
-static inline int raw_mkdirat(int dirfd, const char *path, mode_t mode) {
-    return (int)syscall(SYS_mkdirat, dirfd, path, mode);
+#ifndef MFD_CLOEXEC
+#define MFD_CLOEXEC 0x0001U
+#endif
+
+static inline int raw_memfd_create(const char *name, unsigned int flags) {
+#ifdef SYS_memfd_create
+    return (int)syscall(SYS_memfd_create, name, flags);
+#else
+    (void)name;
+    (void)flags;
+    errno = ENOSYS;
+    return -1;
+#endif
 }
 
-static bool ensure_temp_dir() {
-    if (g_temp_dir.empty()) return false;
-    if (raw_mkdirat(AT_FDCWD, g_temp_dir.c_str(), 0700) == 0) return true;
-    if (errno == EEXIST) return true;
-    // If /data/data/<pkg> isn't accessible yet, this may fail. Log and continue.
-    LOGW("[%s] mkdir failed: %s (errno=%d)", ZMOD_ID, g_temp_dir.c_str(), errno);
-    return false;
+static inline off_t raw_lseek(int fd, off_t off, int whence) {
+#ifdef SYS_lseek
+    return (off_t)syscall(SYS_lseek, fd, off, whence);
+#elif defined(SYS__llseek)
+    // Fallback for some 32-bit archs; not expected on arm64.
+    (void)fd;
+    (void)off;
+    (void)whence;
+    errno = ENOSYS;
+    return (off_t)-1;
+#else
+    return lseek(fd, off, whence);
+#endif
 }
 
-static bool copy_file_raw(const char *src, const char *dst) {
-    if (!src || !dst) return false;
-    if (!ensure_temp_dir()) return false;
+static bool read_text_file_raw(const char *path, std::string &out) {
+    out.clear();
+    if (!path || path[0] == '\0') return false;
+    int fd = raw_openat(AT_FDCWD, path, O_RDONLY | O_CLOEXEC, 0);
+    if (fd < 0) return false;
 
-    int in = raw_openat(AT_FDCWD, src, O_RDONLY | O_CLOEXEC, 0);
-    if (in < 0) return false;
-
-    int out = raw_openat(AT_FDCWD, dst, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-    if (out < 0) {
-        raw_close(in);
-        return false;
-    }
-
-    char buf[8192];
-    bool ok = true;
-    for (;;) {
-        ssize_t n = raw_read(in, buf, sizeof(buf));
-        if (n == 0) break;
-        if (n < 0) {
-            ok = false;
-            break;
-        }
-        ssize_t off = 0;
-        while (off < n) {
-            ssize_t w = raw_write(out, buf + off, (size_t)(n - off));
-            if (w <= 0) {
-                ok = false;
-                break;
-            }
-            off += w;
-        }
-        if (!ok) break;
-    }
-
-    raw_close(out);
-    raw_close(in);
-    return ok;
-}
-
-static bool rewrite_maps_for_shadow_modules(const char *dst_maps_path) {
-    if (!dst_maps_path || dst_maps_path[0] == '\0') return false;
-
-    const auto shadows = sample::shadow_loader::snapshot_modules();
-    if (shadows.empty()) return true; // nothing to rewrite
-
-    int fd = raw_openat(AT_FDCWD, dst_maps_path, O_RDONLY | O_CLOEXEC, 0);
-    if (fd < 0) {
-        LOGE("[%s][maps] rewrite failed: open %s", ZMOD_ID, dst_maps_path);
-        return false;
-    }
-
-    std::string content;
     char buf[8192];
     for (;;) {
         ssize_t n = raw_read(fd, buf, sizeof(buf));
         if (n == 0) break;
         if (n < 0) {
             raw_close(fd);
-            LOGE("[%s][maps] rewrite failed: read %s", ZMOD_ID, dst_maps_path);
             return false;
         }
-        content.append(buf, buf + n);
-        if (content.size() > (8u * 1024u * 1024u)) { // sanity cap
-            break;
-        }
+        out.append(buf, buf + n);
+        if (out.size() > (8u * 1024u * 1024u)) break; // sanity cap
     }
     raw_close(fd);
+    return !out.empty();
+}
+
+static bool rewrite_maps_for_shadow_modules(const std::string &content, std::string &out) {
+    const auto shadows = sample::shadow_loader::snapshot_modules();
+    if (shadows.empty()) {
+        out = content;
+        return true; // nothing to rewrite
+    }
 
     // Determine original base for each module from the first matching line.
     std::unordered_map<std::string, uintptr_t> orig_base;
@@ -205,7 +181,7 @@ static bool rewrite_maps_for_shadow_modules(const char *dst_maps_path) {
     }
 
     // Second pass: rewrite addresses using delta = shadow_base - orig_base.
-    std::string out;
+    out.clear();
     out.reserve(content.size());
     size_t pos = 0;
     while (pos < content.size()) {
@@ -269,24 +245,32 @@ static bool rewrite_maps_for_shadow_modules(const char *dst_maps_path) {
         if (has_nl) out.push_back('\n');
     }
 
-    int wfd = raw_openat(AT_FDCWD, dst_maps_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-    if (wfd < 0) {
-        LOGE("[%s][maps] rewrite failed: write open %s", ZMOD_ID, dst_maps_path);
-        return false;
-    }
-    bool ok = true;
+    return true;
+}
+
+static bool build_rewritten_maps_for_path(const char *maps_path, std::string &out) {
+    std::string content;
+    if (!read_text_file_raw(maps_path, content)) return false;
+    if (!rewrite_maps_for_shadow_modules(content, out)) return false;
+    return true;
+}
+
+static int create_memfd_with_content(const char *tag, const std::string &content, bool cloexec) {
+    unsigned int mfd_flags = cloexec ? MFD_CLOEXEC : 0U;
+    int fd = raw_memfd_create(tag ? tag : "maps", mfd_flags);
+    if (fd < 0) return -1;
+
     size_t off = 0;
-    while (off < out.size()) {
-        ssize_t n = raw_write(wfd, out.data() + off, out.size() - off);
+    while (off < content.size()) {
+        ssize_t n = raw_write(fd, content.data() + off, content.size() - off);
         if (n <= 0) {
-            ok = false;
-            break;
+            raw_close(fd);
+            return -1;
         }
         off += (size_t)n;
     }
-    raw_close(wfd);
-    if (!ok) LOGE("[%s][maps] rewrite failed: write %s", ZMOD_ID, dst_maps_path);
-    return ok;
+    (void)raw_lseek(fd, 0, SEEK_SET);
+    return fd;
 }
 
 static bool is_current_maps_path(const char *path) {
@@ -335,12 +319,15 @@ static int new_openat(int dirfd, const char *pathname, int flags, ...) {
     mode_t mode = extract_mode_if_needed(flags, ap);
     va_end(ap);
 
-    if (is_current_maps_path(pathname) && !g_temp_maps.empty() && old_openat) {
-        if (copy_file_raw(pathname, g_temp_maps.c_str())) {
-            if (!rewrite_maps_for_shadow_modules(g_temp_maps.c_str())) {
-                LOGE("[%s][maps] rewrite maps failed; continue with copied file", ZMOD_ID);
+    if (is_current_maps_path(pathname) && old_openat) {
+        // Only handle read-only opens for /proc/*/maps.
+        if ((flags & (O_WRONLY | O_RDWR)) == 0 && (flags & O_CREAT) == 0 && (flags & O_TRUNC) == 0) {
+            std::string rewritten;
+            if (build_rewritten_maps_for_path(pathname, rewritten)) {
+                bool cloexec = (flags & O_CLOEXEC) != 0;
+                int mfd = create_memfd_with_content("maps", rewritten, cloexec);
+                if (mfd >= 0) return mfd;
             }
-            return old_openat(dirfd, g_temp_maps.c_str(), flags, mode);
         }
         return old_openat(dirfd, pathname, flags, mode);
     }
@@ -353,12 +340,14 @@ static int new_open(const char *pathname, int flags, ...) {
     mode_t mode = extract_mode_if_needed(flags, ap);
     va_end(ap);
 
-    if (is_current_maps_path(pathname) && !g_temp_maps.empty() && old_open) {
-        if (copy_file_raw(pathname, g_temp_maps.c_str())) {
-            if (!rewrite_maps_for_shadow_modules(g_temp_maps.c_str())) {
-                LOGE("[%s][maps] rewrite maps failed; continue with copied file", ZMOD_ID);
+    if (is_current_maps_path(pathname) && old_open) {
+        if ((flags & (O_WRONLY | O_RDWR)) == 0 && (flags & O_CREAT) == 0 && (flags & O_TRUNC) == 0) {
+            std::string rewritten;
+            if (build_rewritten_maps_for_path(pathname, rewritten)) {
+                bool cloexec = (flags & O_CLOEXEC) != 0;
+                int mfd = create_memfd_with_content("maps", rewritten, cloexec);
+                if (mfd >= 0) return mfd;
             }
-            return old_open(g_temp_maps.c_str(), flags, mode);
         }
         return old_open(pathname, flags, mode);
     }
@@ -366,12 +355,18 @@ static int new_open(const char *pathname, int flags, ...) {
 }
 
 static FILE *new_fopen(const char *pathname, const char *mode) {
-    if (is_current_maps_path(pathname) && !g_temp_maps.empty() && old_fopen) {
-        if (copy_file_raw(pathname, g_temp_maps.c_str())) {
-            if (!rewrite_maps_for_shadow_modules(g_temp_maps.c_str())) {
-                LOGE("[%s][maps] rewrite maps failed; continue with copied file", ZMOD_ID);
+    if (is_current_maps_path(pathname) && old_fopen) {
+        // Only replace for pure read modes.
+        if (mode && mode[0] == 'r' && std::strchr(mode, '+') == nullptr) {
+            std::string rewritten;
+            if (build_rewritten_maps_for_path(pathname, rewritten)) {
+                int mfd = create_memfd_with_content("maps", rewritten, false);
+                if (mfd >= 0) {
+                    FILE *fp = fdopen(mfd, "r");
+                    if (fp) return fp;
+                    raw_close(mfd);
+                }
             }
-            return old_fopen(g_temp_maps.c_str(), mode);
         }
         return old_fopen(pathname, mode);
     }
@@ -379,12 +374,17 @@ static FILE *new_fopen(const char *pathname, const char *mode) {
 }
 
 static FILE *new_fopen64(const char *pathname, const char *mode) {
-    if (is_current_maps_path(pathname) && !g_temp_maps.empty() && old_fopen64) {
-        if (copy_file_raw(pathname, g_temp_maps.c_str())) {
-            if (!rewrite_maps_for_shadow_modules(g_temp_maps.c_str())) {
-                LOGE("[%s][maps] rewrite maps failed; continue with copied file", ZMOD_ID);
+    if (is_current_maps_path(pathname) && old_fopen64) {
+        if (mode && mode[0] == 'r' && std::strchr(mode, '+') == nullptr) {
+            std::string rewritten;
+            if (build_rewritten_maps_for_path(pathname, rewritten)) {
+                int mfd = create_memfd_with_content("maps", rewritten, false);
+                if (mfd >= 0) {
+                    FILE *fp = fdopen(mfd, "r");
+                    if (fp) return fp;
+                    raw_close(mfd);
+                }
             }
-            return old_fopen64(g_temp_maps.c_str(), mode);
         }
         return old_fopen64(pathname, mode);
     }
@@ -425,20 +425,13 @@ bool install(const std::string &package_name, const std::string &app_data_dir) {
         LOGE("[%s][maps] install failed: empty package", ZMOD_ID);
         return false;
     }
-    if (app_data_dir.empty()) {
-        LOGE("[%s][maps] install failed: empty app_data_dir", ZMOD_ID);
-        return false;
-    }
+    (void)app_data_dir; // no longer used (memfd-based)
     if (!g_pkg.empty()) {
         LOGI("[%s][maps] already installed", ZMOD_ID);
         return true;
     }
 
     g_pkg = package_name;
-    g_temp_dir = app_data_dir;
-    if (!g_temp_dir.empty() && g_temp_dir.back() == '/') g_temp_dir.pop_back();
-    g_temp_dir += "/temp";
-    g_temp_maps = g_temp_dir + "/maps";
 
     LOGI("[%s][maps] installing open/openat/fopen hooks (pkg=%s)", ZMOD_ID, g_pkg.c_str());
     bool ok = true;
@@ -463,7 +456,7 @@ bool install(const std::string &package_name, const std::string &app_data_dir) {
         }
     }
 
-    LOGI("[%s][maps] install ok (temp=%s)", ZMOD_ID, g_temp_maps.c_str());
+    LOGI("[%s][maps] install ok (memfd)", ZMOD_ID);
     return true;
 }
 

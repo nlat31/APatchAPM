@@ -53,6 +53,36 @@ static jobject to_reflected_method(JNIEnv *env, jclass cls, jmethodID mid, bool 
     return env->ToReflectedMethod(cls, mid, is_static ? JNI_TRUE : JNI_FALSE);
 }
 
+static void log_and_clear_exception(JNIEnv *env, const char *where) {
+    if (!env->ExceptionCheck()) return;
+    jthrowable ex = env->ExceptionOccurred();
+    env->ExceptionClear();
+
+    jclass thr_cls = find_class(env, "java/lang/Throwable");
+    if (!thr_cls || !ex) {
+        LOGE("[%s][java] %s threw (unknown)", ZMOD_ID, where);
+        return;
+    }
+
+    jmethodID to_string = env->GetMethodID(thr_cls, "toString", "()Ljava/lang/String;");
+    if (!to_string) {
+        env->ExceptionClear();
+        LOGE("[%s][java] %s threw (toString missing)", ZMOD_ID, where);
+        return;
+    }
+
+    jstring s = (jstring)env->CallObjectMethod(ex, to_string);
+    if (env->ExceptionCheck() || !s) {
+        env->ExceptionClear();
+        LOGE("[%s][java] %s threw (toString failed)", ZMOD_ID, where);
+        return;
+    }
+
+    const char *cs = env->GetStringUTFChars(s, nullptr);
+    LOGE("[%s][java] %s threw: %s", ZMOD_ID, where, cs ? cs : "<null>");
+    if (cs) env->ReleaseStringUTFChars(s, cs);
+}
+
 namespace sample {
 namespace java_hook {
 
@@ -123,6 +153,12 @@ bool install_hooks(JNIEnv *env, const std::vector<uint8_t> &dex_data) {
         LOGE("[%s][java] classes.dex is empty", ZMOD_ID);
         return false;
     }
+    if (dex_data.size() >= 4) {
+        LOGI("[%s][java] dex size=%zu magic=%c%c%c%c", ZMOD_ID, dex_data.size(),
+             (char)dex_data[0], (char)dex_data[1], (char)dex_data[2], (char)dex_data[3]);
+    } else {
+        LOGI("[%s][java] dex size=%zu", ZMOD_ID, dex_data.size());
+    }
 
     jclass loader_cls = find_class(env, "dalvik/system/InMemoryDexClassLoader");
     if (!loader_cls) {
@@ -145,9 +181,20 @@ bool install_hooks(JNIEnv *env, const std::vector<uint8_t> &dex_data) {
         return false;
     }
 
-    jobject loader = env->NewObject(loader_cls, ctor, buf, nullptr);
+    jobject parent = nullptr;
+    if (jclass cl_cls = find_class(env, "java/lang/ClassLoader")) {
+        jmethodID mid = env->GetStaticMethodID(cl_cls, "getSystemClassLoader", "()Ljava/lang/ClassLoader;");
+        if (mid) {
+            parent = env->CallStaticObjectMethod(cl_cls, mid);
+            log_and_clear_exception(env, "ClassLoader.getSystemClassLoader");
+        } else {
+            env->ExceptionClear();
+        }
+    }
+
+    jobject loader = env->NewObject(loader_cls, ctor, buf, parent);
     if (!loader || env->ExceptionCheck()) {
-        env->ExceptionClear();
+        log_and_clear_exception(env, "InMemoryDexClassLoader.<init>");
         LOGE("[%s][java] Failed to create InMemoryDexClassLoader", ZMOD_ID);
         return false;
     }
@@ -155,7 +202,7 @@ bool install_hooks(JNIEnv *env, const std::vector<uint8_t> &dex_data) {
     jstring hooker_name = env->NewStringUTF(ZMOD_HOOKER_CLASS);
     jclass hooker_cls = (jclass)env->CallObjectMethod(loader, load_class, hooker_name);
     if (env->ExceptionCheck() || !hooker_cls) {
-        env->ExceptionClear();
+        log_and_clear_exception(env, "InMemoryDexClassLoader.loadClass");
         LOGE("[%s][java] Failed to load Hooker class: %s", ZMOD_ID, ZMOD_HOOKER_CLASS);
         return false;
     }

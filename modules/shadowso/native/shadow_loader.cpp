@@ -175,6 +175,23 @@ static bool shadow_load_path_locked(const std::string &target_lower, const std::
     if (path.empty()) return false;
     if (g_loaded_targets.find(target_lower) != g_loaded_targets.end()) return true;
 
+    // CSOLoader may abort/crash on some core/runtime libraries (e.g. /apex/libc.so, /apex/libart.so)
+    // depending on device/linker implementation. Shadow-loading is an optional hardening step for
+    // "hide" and should never prevent the rest of hooks from working.
+    auto starts_with = [](const std::string &s, const char *p) -> bool {
+        const size_t n = std::strlen(p);
+        return s.size() >= n && std::memcmp(s.data(), p, n) == 0;
+    };
+    if (starts_with(path, "/apex/") || starts_with(path, "/system/") || starts_with(path, "/vendor/") ||
+        starts_with(path, "/product/") || starts_with(path, "/odm/") || starts_with(path, "/system_ext/")) {
+        LOGW("[%s][shadow] skip shadow-load for %s (path=%s)", ZMOD_ID, target_lower.c_str(), path.c_str());
+        g_loaded_targets.insert(target_lower);
+        auto &info = g_info_by_target[target_lower];
+        info.name_lower = target_lower;
+        info.orig_path = path;
+        return true;
+    }
+
     auto *lib = new csoloader();
     std::memset(lib, 0, sizeof(*lib));
     if (!csoloader_load(lib, path.c_str())) {
@@ -350,6 +367,7 @@ bool initialize(const std::vector<std::string> &so_names) {
         LOGI("[%s][shadow] no targets configured; skip", ZMOD_ID);
         return true;
     }
+    LOGI("[%s][shadow] initialize: targets=%zu", ZMOD_ID, g_targets.size());
 
     // First pass: enumerate currently loaded modules and shadow-load those we can find.
     std::unordered_set<std::string> pending = g_targets;
@@ -378,11 +396,10 @@ bool initialize(const std::vector<std::string> &so_names) {
     // If something is still missing, hook do_dlopen so we can shadow-load it immediately
     // after it gets loaded by the app/runtime.
     if (!pending.empty()) {
-        if (!install_do_dlopen_hook_locked()) {
-            LOGE("[%s][shadow] install do_dlopen hook failed; stop shadow-loader", ZMOD_ID);
-            return false;
-        }
-        LOGI("[%s][shadow] pending targets (wait do_dlopen): %zu", ZMOD_ID, pending.size());
+        // Some ROMs/Android versions have fragile linker symbol resolution; installing
+        // a do_dlopen hook can crash the process. Shadow-loading is an optional feature
+        // for hiding, so prefer continuing without late-load support.
+        LOGW("[%s][shadow] pending targets=%zu; skip do_dlopen hook and continue", ZMOD_ID, pending.size());
     } else {
         LOGI("[%s][shadow] all targets shadow-loaded in first pass (%zu)", ZMOD_ID, g_loaded_targets.size());
     }
