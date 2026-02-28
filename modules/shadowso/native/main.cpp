@@ -282,32 +282,6 @@ public:
             return;
         }
 
-        if (cfg.opt_maps_redirect) {
-            // Hook file open as early as possible (before other code that may read /proc/self/maps).
-            const char *data_dir = env_->GetStringUTFChars(args->app_data_dir, nullptr);
-            std::string pkg;
-            std::string app_data_dir;
-            if (data_dir) {
-                std::string s = data_dir;
-                if (!s.empty() && s.back() == '/') s.pop_back();
-                app_data_dir = s;
-                size_t slash = s.find_last_of('/');
-                if (slash != std::string::npos && slash + 1 < s.size()) {
-                    pkg = s.substr(slash + 1);
-                }
-                env_->ReleaseStringUTFChars(args->app_data_dir, data_dir);
-            }
-            if (!pkg.empty()) {
-                if (!sample::maps_hook::install(pkg, app_data_dir)) {
-                    LOGE("[%s][core] maps_hook install failed; stop", ZMOD_ID);
-                    return;
-                }
-            } else {
-                LOGE("[%s][core] failed to parse package from app_data_dir; stop", ZMOD_ID);
-                return;
-            }
-        }
-
         // Must run as early as possible after fork, before app code executes:
         // enumerate already-loaded modules and shadow-load configured targets,
         // then hook do_dlopen for late-loaded targets.
@@ -347,6 +321,33 @@ public:
             }
             if (!sample::java_hook::install_hooks(env_, g_dex_data)) {
                 LOGE("[%s][core] java_hook install failed; stop", ZMOD_ID);
+                return;
+            }
+        }
+
+        // Install maps redirection last. After this point, /proc/self/maps may be rewritten,
+        // so do not depend on reading maps for module base/resolution.
+        if (cfg.opt_maps_redirect) {
+            const char *data_dir = env_->GetStringUTFChars(args->app_data_dir, nullptr);
+            std::string pkg;
+            std::string app_data_dir;
+            if (data_dir) {
+                std::string s = data_dir;
+                if (!s.empty() && s.back() == '/') s.pop_back();
+                app_data_dir = s;
+                size_t slash = s.find_last_of('/');
+                if (slash != std::string::npos && slash + 1 < s.size()) {
+                    pkg = s.substr(slash + 1);
+                }
+                env_->ReleaseStringUTFChars(args->app_data_dir, data_dir);
+            }
+            if (!pkg.empty()) {
+                if (!sample::maps_hook::install(pkg, app_data_dir)) {
+                    LOGE("[%s][core] maps_hook install failed; stop", ZMOD_ID);
+                    return;
+                }
+            } else {
+                LOGE("[%s][core] failed to parse package from app_data_dir; stop", ZMOD_ID);
                 return;
             }
         }

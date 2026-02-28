@@ -131,6 +131,95 @@ ElfImg::ElfImg(std::string_view base_name) : elf(base_name) {
     }
 }
 
+ElfImg::ElfImg(std::string_view elf_path, void *module_base) : elf(elf_path), base(module_base) {
+    if (!base) {
+        LOGE("ElfImg: module_base is null for %s", elf.data());
+        return;
+    }
+
+    int fd = open(elf.data(), O_RDONLY);
+    if (fd < 0) {
+        LOGE("failed to open %s", elf.data());
+        return;
+    }
+
+    size = lseek(fd, 0, SEEK_END);
+    if (size <= 0) {
+        LOGE("lseek() failed for %s", elf.data());
+    }
+
+    header = reinterpret_cast<decltype(header)>(mmap(nullptr, size, PROT_READ, MAP_SHARED, fd, 0));
+
+    close(fd);
+
+    section_header = offsetOf<decltype(section_header)>(header, header->e_shoff);
+
+    auto shoff = reinterpret_cast<uintptr_t>(section_header);
+    char *section_str = offsetOf<char *>(header, section_header[header->e_shstrndx].sh_offset);
+
+    for (int i = 0; i < header->e_shnum; i++, shoff += header->e_shentsize) {
+        auto *section_h = (ElfW(Shdr) *) shoff;
+        char *sname = section_h->sh_name + section_str;
+        auto entsize = section_h->sh_entsize;
+        switch (section_h->sh_type) {
+            case SHT_DYNSYM: {
+                if (bias == -4396) {
+                    dynsym = section_h;
+                    dynsym_offset = section_h->sh_offset;
+                    dynsym_start = offsetOf<decltype(dynsym_start)>(header, dynsym_offset);
+                }
+                break;
+            }
+            case SHT_SYMTAB: {
+                if (strcmp(sname, ".symtab") == 0) {
+                    symtab = section_h;
+                    symtab_offset = section_h->sh_offset;
+                    symtab_size = section_h->sh_size;
+                    symtab_count = symtab_size / entsize;
+                    symtab_start = offsetOf<decltype(symtab_start)>(header, symtab_offset);
+                }
+                break;
+            }
+            case SHT_STRTAB: {
+                if (bias == -4396) {
+                    strtab = section_h;
+                    symstr_offset = section_h->sh_offset;
+                    strtab_start = offsetOf<decltype(strtab_start)>(header, symstr_offset);
+                }
+                if (strcmp(sname, ".strtab") == 0) {
+                    symstr_offset_for_symtab = section_h->sh_offset;
+                }
+                break;
+            }
+            case SHT_PROGBITS: {
+                if (strtab == nullptr || dynsym == nullptr) break;
+                if (bias == -4396) {
+                    bias = (off_t) section_h->sh_addr - (off_t) section_h->sh_offset;
+                }
+                break;
+            }
+            case SHT_HASH: {
+                auto *d_un = offsetOf<ElfW(Word)>(header, section_h->sh_offset);
+                nbucket_ = d_un[0];
+                bucket_ = d_un + 2;
+                chain_ = bucket_ + nbucket_;
+                break;
+            }
+            case SHT_GNU_HASH: {
+                auto *d_buf = reinterpret_cast<ElfW(Word) *>(((size_t) header) + section_h->sh_offset);
+                gnu_nbucket_ = d_buf[0];
+                gnu_symndx_ = d_buf[1];
+                gnu_bloom_size_ = d_buf[2];
+                gnu_shift2_ = d_buf[3];
+                gnu_bloom_filter_ = reinterpret_cast<decltype(gnu_bloom_filter_)>(d_buf + 4);
+                gnu_bucket_ = reinterpret_cast<decltype(gnu_bucket_)>(gnu_bloom_filter_ + gnu_bloom_size_);
+                gnu_chain_ = gnu_bucket_ + gnu_nbucket_ - gnu_symndx_;
+                break;
+            }
+        }
+    }
+}
+
 ElfW(Addr) ElfImg::ElfLookup(std::string_view name, uint32_t hash) const {
     if (nbucket_ == 0) return 0;
 

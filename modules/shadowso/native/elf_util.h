@@ -36,6 +36,8 @@ namespace SandHook {
     public:
 
         ElfImg(std::string_view elf);
+        // Construct with a known module base and full path. This avoids reading /proc/self/maps.
+        ElfImg(std::string_view elf_path, void *module_base);
 
         template<typename T = void*>
         requires(std::is_pointer_v<T>)

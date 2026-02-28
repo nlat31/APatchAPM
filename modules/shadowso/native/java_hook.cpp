@@ -10,6 +10,8 @@
 #include <dobby.h>
 #include <lsplant.hpp>
 
+#include "shadow_loader.h"
+
 #ifndef ZMOD_ID
 #define ZMOD_ID "shadowso"
 #endif
@@ -26,7 +28,16 @@
 static std::unique_ptr<const SandHook::ElfImg> &GetArt() {
     static std::unique_ptr<const SandHook::ElfImg> kArtImg = nullptr;
     if (!kArtImg) {
-        kArtImg = std::make_unique<SandHook::ElfImg>("libart.so");
+        // Do not read /proc/self/maps here (it may already be redirected). Use cached module info.
+        std::string art_path;
+        uintptr_t art_base = 0;
+        (void)sample::shadow_loader::get_orig_module_info("libart.so", art_path, art_base);
+        if (!art_path.empty() && art_base != 0) {
+            kArtImg = std::make_unique<SandHook::ElfImg>(art_path, reinterpret_cast<void *>(art_base));
+        } else {
+            // Keep a non-null object so resolvers can safely return nullptr.
+            kArtImg = std::make_unique<SandHook::ElfImg>("", nullptr);
+        }
     }
     return kArtImg;
 }

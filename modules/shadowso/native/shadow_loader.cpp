@@ -47,6 +47,18 @@ static std::unordered_set<std::string> g_loaded_targets;
 static std::unordered_map<std::string, uintptr_t> g_shadow_base_by_target;
 static std::unordered_map<std::string, ShadowModuleInfo> g_info_by_target;
 
+struct OrigModuleInfo {
+    std::string path;
+    uintptr_t base = 0;
+    size_t size = 0;
+    const ElfW(Phdr) *phdr = nullptr;
+    ElfW(Half) phnum = 0;
+};
+static std::unordered_map<std::string, OrigModuleInfo> g_orig_by_basename;
+
+static std::string g_linker_path;
+static uintptr_t g_linker_base = 0;
+
 // Keep CSOLoader instances alive for the entire process lifetime.
 static std::vector<csoloader *> g_shadow_libs;
 
@@ -63,133 +75,118 @@ static std::string basename_lower_of(const std::string &path_or_name_lower) {
     return path_or_name_lower.substr(slash + 1);
 }
 
-static bool has_substr_case_insensitive(const char *haystack, const std::string &needle_lower) {
-    if (!haystack) return false;
-    std::string h = to_lower(std::string(haystack));
-    return h.find(needle_lower) != std::string::npos;
-}
+static bool snapshot_targets_from_dl_iterate_phdr_locked() {
+    // Enumerate loaded modules once. Do not depend on /proc/self/maps (it may be redirected later).
+    struct Ctx {
+        std::unordered_set<std::string> targets;
+    } ctx{g_targets};
 
-static inline int raw_openat(int dirfd, const char *path, int flags, mode_t mode) {
-    return (int)syscall(SYS_openat, dirfd, path, flags, mode);
-}
-static inline int raw_close(int fd) {
-    return (int)syscall(SYS_close, fd);
-}
-static inline ssize_t raw_read(int fd, void *buf, size_t n) {
-    return (ssize_t)syscall(SYS_read, fd, buf, n);
-}
+    auto cb = [](struct dl_phdr_info *info, size_t /*size*/, void *data) -> int {
+        if (!info || !data) return 0;
+        auto *c = reinterpret_cast<Ctx *>(data);
+        const char *name = info->dlpi_name;
+        if (!name || name[0] == '\0') return 0;
 
-static bool collect_maps_stats_for_basename(const std::string &basename_lower,
-                                            uintptr_t &out_base,
-                                            size_t &out_sum_size) {
-    out_base = 0;
-    out_sum_size = 0;
-    if (basename_lower.empty()) return false;
-
-    int fd = raw_openat(AT_FDCWD, "/proc/self/maps", O_RDONLY | O_CLOEXEC, 0);
-    if (fd < 0) return false;
-
-    std::string content;
-    char buf[8192];
-    for (;;) {
-        ssize_t n = raw_read(fd, buf, sizeof(buf));
-        if (n == 0) break;
-        if (n < 0) {
-            raw_close(fd);
-            return false;
-        }
-        content.append(buf, buf + n);
-        if (content.size() > (8u * 1024u * 1024u)) break; // sanity cap
-    }
-    raw_close(fd);
-
-    auto parse_range = [](const std::string &line, uintptr_t &start, uintptr_t &end) -> bool {
-        size_t dash = line.find('-');
-        if (dash == std::string::npos) return false;
-        size_t sp = line.find(' ', dash + 1);
-        if (sp == std::string::npos) return false;
-        std::string a = line.substr(0, dash);
-        std::string b = line.substr(dash + 1, sp - (dash + 1));
-        if (a.empty() || b.empty()) return false;
-        char *e1 = nullptr;
-        char *e2 = nullptr;
-        errno = 0;
-        unsigned long long va = std::strtoull(a.c_str(), &e1, 16);
-        unsigned long long vb = std::strtoull(b.c_str(), &e2, 16);
-        if (errno != 0 || !e1 || *e1 != '\0' || !e2 || *e2 != '\0') return false;
-        start = (uintptr_t)va;
-        end = (uintptr_t)vb;
-        return end > start;
-    };
-
-    auto extract_path = [](const std::string &line) -> std::string {
-        size_t slash = line.find('/');
-        if (slash == std::string::npos) return {};
-        return line.substr(slash);
-    };
-
-    size_t pos = 0;
-    while (pos < content.size()) {
-        size_t nl = content.find('\n', pos);
-        std::string line = (nl == std::string::npos) ? content.substr(pos) : content.substr(pos, nl - pos);
-        pos = (nl == std::string::npos) ? content.size() : (nl + 1);
-
-        uintptr_t start = 0, end = 0;
-        if (!parse_range(line, start, end)) continue;
-
-        std::string path = extract_path(line);
-        if (path.empty()) continue;
+        std::string path(name);
         std::string path_lower = to_lower(path);
         std::string bn = basename_lower_of(path_lower);
-        if (bn != basename_lower) continue;
 
-        if (out_base == 0 || start < out_base) out_base = start;
-        out_sum_size += (size_t)(end - start);
-    }
+        // Cache original module info by basename for later queries (no more enumeration/maps).
+        if (!bn.empty() && g_orig_by_basename.find(bn) == g_orig_by_basename.end()) {
+            OrigModuleInfo omi;
+            omi.path = path;
+            omi.phdr = info->dlpi_phdr;
+            omi.phnum = info->dlpi_phnum;
+            uintptr_t min_vaddr = (uintptr_t)-1;
+            uintptr_t max_vaddr = 0;
+            for (ElfW(Half) i = 0; i < info->dlpi_phnum; i++) {
+                const ElfW(Phdr) &p = info->dlpi_phdr[i];
+                if (p.p_type != PT_LOAD) continue;
+                uintptr_t seg_start = (uintptr_t)p.p_vaddr & ~(uintptr_t)0xFFF;
+                uintptr_t seg_end = ((uintptr_t)p.p_vaddr + (uintptr_t)p.p_memsz + (uintptr_t)0xFFF) & ~(uintptr_t)0xFFF;
+                if (seg_start < min_vaddr) min_vaddr = seg_start;
+                if (seg_end > max_vaddr) max_vaddr = seg_end;
+            }
+            if (min_vaddr != (uintptr_t)-1 && max_vaddr > min_vaddr) {
+                omi.base = (uintptr_t)info->dlpi_addr + min_vaddr;
+                omi.size = (size_t)(max_vaddr - min_vaddr);
+            }
+            g_orig_by_basename.emplace(bn, std::move(omi));
+        }
 
-    return out_base != 0 && out_sum_size != 0;
-}
+        // Cache linker path/base for installing do_dlopen hook later, without reading maps.
+#if defined(__LP64__)
+        constexpr const char *k_linker_bn = "linker64";
+#else
+        constexpr const char *k_linker_bn = "linker";
+#endif
+        if (bn == k_linker_bn) {
+            uintptr_t min_vaddr = (uintptr_t)-1;
+            for (ElfW(Half) i = 0; i < info->dlpi_phnum; i++) {
+                const ElfW(Phdr) &p = info->dlpi_phdr[i];
+                if (p.p_type != PT_LOAD) continue;
+                uintptr_t seg_start = (uintptr_t)p.p_vaddr & ~(uintptr_t)0xFFF;
+                if (seg_start < min_vaddr) min_vaddr = seg_start;
+            }
+            if (min_vaddr != (uintptr_t)-1) {
+                g_linker_path = path;
+                g_linker_base = (uintptr_t)info->dlpi_addr + min_vaddr;
+            }
+        }
 
-static std::string find_loaded_path_by_target_locked(const std::string &target_lower) {
-    std::string found;
-    auto cb = [](struct dl_phdr_info *info, size_t /*size*/, void *data) -> int {
-        auto *ctx = reinterpret_cast<std::pair<const std::string *, std::string *> *>(data);
-        const std::string &needle_lower = *ctx->first;
-        std::string &out = *ctx->second;
+        for (const auto &t : c->targets) {
+            if (t.empty()) continue;
+            if (bn != t) continue;
 
-        const char *name = info ? info->dlpi_name : nullptr;
-        if (!name || name[0] == '\0') return 0;
-        if (has_substr_case_insensitive(name, needle_lower)) {
-            out = name;
-            return 1; // stop
+            auto &mi = g_info_by_target[t];
+            mi.name_lower = t;
+            mi.orig_path = path;
+            mi.orig_phdr = info->dlpi_phdr;
+            mi.orig_phnum = info->dlpi_phnum;
+
+            // Compute orig_base/orig_size from PT_LOAD range.
+            uintptr_t min_vaddr = (uintptr_t)-1;
+            uintptr_t max_vaddr = 0;
+            for (ElfW(Half) i = 0; i < info->dlpi_phnum; i++) {
+                const ElfW(Phdr) &p = info->dlpi_phdr[i];
+                if (p.p_type != PT_LOAD) continue;
+                uintptr_t seg_start = (uintptr_t)p.p_vaddr & ~(uintptr_t)0xFFF;
+                uintptr_t seg_end = ((uintptr_t)p.p_vaddr + (uintptr_t)p.p_memsz + (uintptr_t)0xFFF) & ~(uintptr_t)0xFFF;
+                if (seg_start < min_vaddr) min_vaddr = seg_start;
+                if (seg_end > max_vaddr) max_vaddr = seg_end;
+            }
+            if (min_vaddr != (uintptr_t)-1 && max_vaddr > min_vaddr) {
+                // dlpi_addr is the load bias; maps usually show mappings starting at (dlpi_addr + min_vaddr).
+                mi.orig_base = (uintptr_t)info->dlpi_addr + min_vaddr;
+                mi.orig_size = (size_t)(max_vaddr - min_vaddr);
+            }
+            break;
         }
         return 0;
     };
 
-    std::pair<const std::string *, std::string *> ctx{&target_lower, &found};
     dl_iterate_phdr(cb, &ctx);
-    return found;
+
+    // Return true if at least one target was found.
+    for (const auto &t : g_targets) {
+        auto it = g_info_by_target.find(t);
+        if (it != g_info_by_target.end() && !it->second.orig_path.empty()) return true;
+    }
+    return false;
 }
 
 static bool shadow_load_path_locked(const std::string &target_lower, const std::string &path) {
     if (path.empty()) return false;
     if (g_loaded_targets.find(target_lower) != g_loaded_targets.end()) return true;
 
-    // CSOLoader may abort/crash on some core/runtime libraries (e.g. /apex/libc.so, /apex/libart.so)
-    // depending on device/linker implementation. Shadow-loading is an optional hardening step for
-    // "hide" and should never prevent the rest of hooks from working.
-    auto starts_with = [](const std::string &s, const char *p) -> bool {
-        const size_t n = std::strlen(p);
-        return s.size() >= n && std::memcmp(s.data(), p, n) == 0;
-    };
-    if (starts_with(path, "/apex/") || starts_with(path, "/system/") || starts_with(path, "/vendor/") ||
-        starts_with(path, "/product/") || starts_with(path, "/odm/") || starts_with(path, "/system_ext/")) {
-        LOGW("[%s][shadow] skip shadow-load for %s (path=%s)", ZMOD_ID, target_lower.c_str(), path.c_str());
-        g_loaded_targets.insert(target_lower);
-        auto &info = g_info_by_target[target_lower];
-        info.name_lower = target_lower;
-        info.orig_path = path;
-        return true;
+    // Use CSOLoader for all targets (libc, libart, app libs). It handles relocations and linking.
+    // Ensure CSOLoader can resolve DT_NEEDED from the same directory (e.g. /apex/.../lib64/).
+    {
+        const size_t slash = path.find_last_of('/');
+        if (slash != std::string::npos && slash > 0) {
+            const std::string dir = path.substr(0, slash);
+            (void)linker_add_library_search_path(dir.c_str());
+        }
     }
 
     auto *lib = new csoloader();
@@ -224,15 +221,6 @@ static bool shadow_load_path_locked(const std::string &target_lower, const std::
     if (info.orig_path.empty()) {
         info.orig_path = path;
     }
-    if (info.orig_base == 0 || info.orig_size == 0) {
-        const std::string bn = basename_lower_of(to_lower(info.orig_path.empty() ? target_lower : info.orig_path));
-        uintptr_t ob = 0;
-        size_t osz = 0;
-        if (collect_maps_stats_for_basename(bn, ob, osz)) {
-            info.orig_base = ob;
-            info.orig_size = osz;
-        }
-    }
 
     LOGI("[%s][shadow] loaded %s (orig=%s base=0x%lx size=0x%zx, shadow=%s base=0x%lx size=0x%zx)",
          ZMOD_ID,
@@ -266,9 +254,8 @@ static bool try_shadow_load_for_name_locked(const char *name) {
     if (matched_target.empty()) return false;
     if (g_loaded_targets.find(matched_target) != g_loaded_targets.end()) return true;
 
-    // Best effort: prefer real loaded path (dl_iterate_phdr) over argument string.
-    std::string path = find_loaded_path_by_target_locked(matched_target);
-    if (path.empty() && std::strchr(name, '/') != nullptr) path = name;
+    // Do not enumerate modules or read maps here. Use the argument string as best-effort path.
+    std::string path = name;
     if (path.empty()) return false;
 
     return shadow_load_path_locked(matched_target, path);
@@ -304,21 +291,20 @@ static void *new_do_dlopen(const char *name, int flags, const android_dlextinfo 
 static bool install_do_dlopen_hook_locked() {
     if (g_dlopen_hook_installed) return true;
 
-#if defined(__LP64__)
-    const char *linker_name = "linker64";
-#else
-    const char *linker_name = "linker";
-#endif
     const std::string sym = "__dl__Z9do_dlopenPKciPK17android_dlextinfoPKv";
 
-    SandHook::ElfImg linker_img(linker_name);
+    if (g_linker_path.empty() || g_linker_base == 0) {
+        LOGE("[%s][shadow] linker path/base missing; cannot hook do_dlopen safely", ZMOD_ID);
+        return false;
+    }
+    SandHook::ElfImg linker_img(g_linker_path, reinterpret_cast<void *>(g_linker_base));
     if (!linker_img.isValid()) {
-        LOGE("[%s][shadow] linker module not found: %s", ZMOD_ID, linker_name);
+        LOGE("[%s][shadow] linker module not valid: %s", ZMOD_ID, g_linker_path.c_str());
         return false;
     }
     void *target = linker_img.getSymbAddress<void *>(sym);
     if (!target) {
-        LOGE("[%s][shadow] do_dlopen symbol not found in %s", ZMOD_ID, linker_name);
+        LOGE("[%s][shadow] do_dlopen symbol not found in %s", ZMOD_ID, g_linker_path.c_str());
         return false;
     }
 
@@ -347,6 +333,9 @@ bool initialize(const std::vector<std::string> &so_names) {
     g_loaded_targets.clear();
     g_shadow_base_by_target.clear();
     g_info_by_target.clear();
+    g_orig_by_basename.clear();
+    g_linker_path.clear();
+    g_linker_base = 0;
 
     // Normalize to lowercase for case-insensitive substring match.
     for (const auto &s : so_names) {
@@ -369,37 +358,28 @@ bool initialize(const std::vector<std::string> &so_names) {
     }
     LOGI("[%s][shadow] initialize: targets=%zu", ZMOD_ID, g_targets.size());
 
-    // First pass: enumerate currently loaded modules and shadow-load those we can find.
+    // Snapshot loaded modules once, right after fork. Do not read /proc/self/maps.
+    (void)snapshot_targets_from_dl_iterate_phdr_locked();
+
+    // Shadow-load all targets we enumerated in the snapshot.
     std::unordered_set<std::string> pending = g_targets;
     for (const auto &t : g_targets) {
-        std::string path = find_loaded_path_by_target_locked(t);
-        if (!path.empty()) {
-            auto &info = g_info_by_target[t];
-            info.orig_path = path;
-            if (info.orig_base == 0 || info.orig_size == 0) {
-                const std::string bn = basename_lower_of(to_lower(path));
-                uintptr_t ob = 0;
-                size_t osz = 0;
-                if (collect_maps_stats_for_basename(bn, ob, osz)) {
-                    info.orig_base = ob;
-                    info.orig_size = osz;
-                }
-            }
-            if (!shadow_load_path_locked(t, path)) {
-                LOGE("[%s][shadow] shadow-load failed for %s; stop", ZMOD_ID, t.c_str());
-                return false;
-            }
-            pending.erase(t);
+        auto it = g_info_by_target.find(t);
+        if (it == g_info_by_target.end()) continue;
+        const std::string &path = it->second.orig_path;
+        if (path.empty()) continue;
+        if (!shadow_load_path_locked(t, path)) {
+            LOGE("[%s][shadow] shadow-load failed for %s; stop", ZMOD_ID, t.c_str());
+            return false;
         }
+        pending.erase(t);
     }
 
     // If something is still missing, hook do_dlopen so we can shadow-load it immediately
     // after it gets loaded by the app/runtime.
     if (!pending.empty()) {
-        // Some ROMs/Android versions have fragile linker symbol resolution; installing
-        // a do_dlopen hook can crash the process. Shadow-loading is an optional feature
-        // for hiding, so prefer continuing without late-load support.
-        LOGW("[%s][shadow] pending targets=%zu; skip do_dlopen hook and continue", ZMOD_ID, pending.size());
+        LOGW("[%s][shadow] pending targets=%zu; install do_dlopen hook for late-load", ZMOD_ID, pending.size());
+        (void)install_do_dlopen_hook_locked();
     } else {
         LOGI("[%s][shadow] all targets shadow-loaded in first pass (%zu)", ZMOD_ID, g_loaded_targets.size());
     }
@@ -417,6 +397,19 @@ std::vector<ShadowModuleInfo> snapshot_modules() {
         out.push_back(info);
     }
     return out;
+}
+
+bool get_orig_module_info(const std::string &basename_lower, std::string &out_path, uintptr_t &out_base) {
+    out_path.clear();
+    out_base = 0;
+    if (basename_lower.empty()) return false;
+
+    std::lock_guard<std::mutex> lk(g_mu);
+    auto it = g_orig_by_basename.find(basename_lower);
+    if (it == g_orig_by_basename.end()) return false;
+    out_path = it->second.path;
+    out_base = it->second.base;
+    return !out_path.empty() && out_base != 0;
 }
 
 } // namespace shadow_loader

@@ -21,7 +21,7 @@ LSPLANT_REPO="https://github.com/LSPosed/LSPlant.git"
 ZYGISK_HPP_URL="https://raw.githubusercontent.com/topjohnwu/zygisk-module-sample/master/module/jni/zygisk.hpp"
 FRIDA_GUM_VERSION="17.7.3"
 FRIDA_MIRROR_BASE="https://sourceforge.net/projects/frida.mirror/files"
-CSOLOADER_REPO="https://github.com/ThePedroo/CSOLoader.git"
+CSOLOADER_REPO="https://github.com/nlat31/CSOLoader.git"
 
 # 颜色
 RED='\033[0;31m'

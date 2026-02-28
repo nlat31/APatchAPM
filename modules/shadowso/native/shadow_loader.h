@@ -10,10 +10,12 @@ namespace shadow_loader {
 struct ShadowModuleInfo {
     std::string name_lower;    // configured target name (lowercased), e.g. "libc.so"
 
-    // Original (system) module information (from dl_iterate_phdr + /proc/self/maps aggregation)
+    // Original (system) module information (captured from dl_iterate_phdr early after fork)
     std::string orig_path;
-    uintptr_t   orig_base = 0; // lowest start address in maps for that module
-    size_t      orig_size = 0; // sum(end-start) of all maps ranges for that module
+    uintptr_t   orig_base = 0; // base address (lowest PT_LOAD mapping start)
+    size_t      orig_size = 0; // total PT_LOAD address span
+    const ElfW(Phdr) *orig_phdr = nullptr;
+    ElfW(Half) orig_phnum = 0;
 
     // Shadow (CSOLoader) module information (from csoloader return struct)
     std::string shadow_path;
@@ -32,6 +34,10 @@ bool initialize(const std::vector<std::string> &so_names);
 
 // Snapshot all modules that have been shadow-loaded so far (includes orig+shadow metadata).
 std::vector<ShadowModuleInfo> snapshot_modules();
+
+// Query cached original module info (captured once during initialize()).
+// `basename_lower` should be like "libart.so" / "linker64".
+bool get_orig_module_info(const std::string &basename_lower, std::string &out_path, uintptr_t &out_base);
 
 } // namespace shadow_loader
 } // namespace sample
