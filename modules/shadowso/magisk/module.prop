@@ -1,0 +1,7 @@
+id=shadowso
+name=ShadowSo
+version=v1.0.0
+versionCode=1
+author=developer
+description=ShadowSo module (shadow-load libs + hide via maps/phdr/dladdr)
+

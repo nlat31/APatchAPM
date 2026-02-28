@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">ShadowSo Settings</string>
+    <string name="tab_apps">Apps</string>
+    <string name="tab_options">Options</string>
+    <string name="apply">Apply</string>
+    <string name="clear_selection">Clear</string>
+    <string name="apps_tip">Select target apps that this module should apply to.</string>
+    <string name="show_system_apps">Show system apps</string>
+    <string name="enable_module">Enable module hooks</string>
+    <string name="opt_maps_redirect">Maps redirect</string>
+    <string name="opt_hook_phdr">Intercept module enumeration (dl_iterate_phdr)</string>
+    <string name="opt_hook_dladdr">Intercept dladdr</string>
+    <string name="hide_so_label">Hide hooks on SOs</string>
+    <string name="hide_so_helper">Separate multiple SO names with one or more spaces.</string>
+    <string name="hide_so_default">libc.so libart.so</string>
+    <string name="root_required">Root permission is required to read/write /data/adb.</string>
+</resources>
+
