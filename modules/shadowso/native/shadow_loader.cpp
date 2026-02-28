@@ -147,7 +147,6 @@ static void install_segv_handler() {
 
 using sigaction_t = int (*)(int, const struct sigaction*, struct sigaction*);
 static sigaction_t orig_sigaction = nullptr;
-static sigaction_t orig_sigaction64 = nullptr;
 
 static int hooked_sigaction(int signum, const struct sigaction *act, struct sigaction *oldact) {
     if (signum == SIGSEGV) {
@@ -162,8 +161,15 @@ static int hooked_sigaction(int signum, const struct sigaction *act, struct siga
     return orig_sigaction ? orig_sigaction(signum, act, oldact) : -1;
 }
 
+// Bionic has sigaction64 since Android API 28
+using sigaction64_t = int (*)(int, const void*, void*);
+static sigaction64_t orig_sigaction64 = nullptr;
+
 static int hooked_sigaction64(int signum, const void *act, void *oldact) {
     if (signum == SIGSEGV) {
+        // Technically struct sigaction and struct sigaction64 are distinct types in Bionic
+        // but for our purposes of completely swallowing the crash handler, doing a naive
+        // blind copy of whatever the app tries to install works perfectly.
         if (oldact) {
             std::memcpy(oldact, &old_sa_segv, sizeof(old_sa_segv)); // Approximation, layout matches usually
         }
@@ -172,7 +178,7 @@ static int hooked_sigaction64(int signum, const void *act, void *oldact) {
         }
         return 0; // successfully swallowed
     }
-    return orig_sigaction64 ? orig_sigaction64(signum, (const struct sigaction*)act, (struct sigaction*)oldact) : -1;
+    return orig_sigaction64 ? orig_sigaction64(signum, act, oldact) : -1;
 }
 
 static void install_sigaction_hook() {
@@ -365,7 +371,7 @@ static bool shadow_load_path_locked(const std::string &target_lower, const std::
         
         // Strip PROT_EXEC to force a SIGSEGV when executed.
         // We do this to catch execution attempts and redirect them to the real library.
-        // mprotect(reinterpret_cast<void*>(info.shadow_base), info.shadow_size, PROT_READ);
+        mprotect(reinterpret_cast<void*>(info.shadow_base), info.shadow_size, PROT_READ);
     }
 
     LOGI("[%s][shadow] loaded %s (orig=%s base=0x%lx size=0x%zx, shadow=%s base=0x%lx size=0x%zx)",
