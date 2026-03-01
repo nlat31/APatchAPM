@@ -1,6 +1,7 @@
 #include "phdr_hook.h"
 
 #include <android/log.h>
+#include <atomic>
 #include <cctype>
 #include <cstring>
 #include <string>
@@ -30,6 +31,7 @@ namespace {
 using dl_iterate_phdr_t = int (*)(int (*)(struct dl_phdr_info *, size_t, void *), void *);
 static dl_iterate_phdr_t old_dl_iterate_phdr = nullptr;
 static bool g_installed = false;
+static std::atomic<int> g_rewrite_log_budget{32};
 
 static std::string to_lower_copy(const char *s) {
     if (!s) return {};
@@ -97,6 +99,15 @@ static int wrapper_cb(struct dl_phdr_info *info, size_t size, void *data) {
         mod.dlpi_phnum = match->shadow_phnum;
     }
 
+    int left = g_rewrite_log_budget.fetch_sub(1, std::memory_order_relaxed);
+    if (left > 0) {
+        LOGI("[%s][phdr] rewrite entry: orig_name=%s orig_base=0x%lx -> shadow_name=%s shadow_base=0x%lx",
+             ZMOD_ID,
+             name,
+             (unsigned long)info->dlpi_addr,
+             mod.dlpi_name ? mod.dlpi_name : "null",
+             (unsigned long)match->shadow_base);
+    }
     return ctx->user_cb(&mod, size, ctx->user_data);
 }
 
@@ -110,6 +121,8 @@ static int new_dl_iterate_phdr(int (*callback)(struct dl_phdr_info *, size_t, vo
     ctx.user_data = data;
 
     auto mods = sample::shadow_loader::snapshot_modules();
+    LOGI("[%s][phdr] dl_iterate_phdr called: shadow_modules=%zu (log_budget_left=%d)",
+         ZMOD_ID, mods.size(), g_rewrite_log_budget.load(std::memory_order_relaxed));
     ctx.by_basename.reserve(mods.size());
     ctx.by_name_substr.reserve(mods.size());
     for (auto &m : mods) {

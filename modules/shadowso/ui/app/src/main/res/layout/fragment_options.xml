@@ -33,6 +33,23 @@
                     android:textColor="?attr/colorOnSurface" />
 
                 <com.google.android.material.switchmaterial.SwitchMaterial
+                    android:id="@+id/switchInitLsplant"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="Initialize LSPlant"
+                    android:textColor="?attr/colorOnSurface" />
+
+                <com.google.android.material.switchmaterial.SwitchMaterial
+                    android:id="@+id/switchJavaHook"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:layout_marginStart="32dp"
+                    android:text="Enable Java Hook (requires LSPlant)"
+                    android:textColor="?attr/colorOnSurface" />
+
+                <com.google.android.material.switchmaterial.SwitchMaterial
                     android:id="@+id/switchMaps"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"

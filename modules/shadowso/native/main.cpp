@@ -22,7 +22,8 @@
 #define LOGI(...)  __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
 #define LOGW(...)  __android_log_print(ANDROID_LOG_WARN,  LOG_TAG, __VA_ARGS__)
 #define LOGE(...)  __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
-#define LOGD(...)  __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
+// Promote debug logs to INFO to make shadow behavior observable in release logcat.
+#define LOGD(...)  __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
 
 // ========================================================================
 //  Zygisk 模块实现
@@ -33,6 +34,7 @@ static std::vector<uint8_t> g_dex_data;
 struct ModuleConfig {
     bool enabled = false;
     bool hook_native = false;
+    bool init_lsplant = false;
     bool hook_java = false;
     bool opt_maps_redirect = false;
     bool opt_hook_phdr = false;
@@ -196,7 +198,8 @@ static const ModuleConfig &load_config_cached() {
     next.enabled = parse_bool_by_key(json, "enabled", false);
     // If user didn't write hook_native/hook_java, default to enabled.
     next.hook_native = next.enabled && parse_bool_by_key(json, "hook_native", false);
-    next.hook_java = next.enabled && parse_bool_by_key(json, "hook_java", false);
+    next.init_lsplant = next.enabled && parse_bool_by_key(json, "init_lsplant", false);
+    next.hook_java = next.init_lsplant && parse_bool_by_key(json, "hook_java", false);
     next.opt_maps_redirect = parse_bool_by_key(json, "opt_maps_redirect", false);
     next.opt_hook_phdr = parse_bool_by_key(json, "opt_hook_phdr", false);
     next.opt_hook_dladdr = parse_bool_by_key(json, "opt_hook_dladdr", false);
@@ -240,10 +243,11 @@ public:
         this->env_ = env;
         LOGI("onLoad(%s): pid=%d uid=%d", ZMOD_ID, getpid(), getuid());
 
-        // Java hook and dex loading is currently disabled.
-        // if (g_dex_data.empty()) {
-        //     load_dex_data();
-        // }
+        // Always attempt to load dex since whether we hook java is now determined
+        // dynamically by config, but initialization (like lsplant) always happens.
+        if (g_dex_data.empty()) {
+            load_dex_data();
+        }
     }
 
     void preAppSpecialize(zygisk::AppSpecializeArgs *args) override {
@@ -258,10 +262,10 @@ public:
         should_inject_ = matches_any_package(proc, cfg.packages);
         hooks_enabled_ = should_inject_ && cfg.enabled;
         hook_native_ = hooks_enabled_ && cfg.hook_native;
-        // Force disable Java hooks to prevent triggering anti-cheat Java exception
-        hook_java_ = false; // hooks_enabled_ && cfg.hook_java;
-        LOGI("[%s][core] match=%d enabled=%d hook_native=%d hook_java=%d",
-             ZMOD_ID, should_inject_ ? 1 : 0, cfg.enabled ? 1 : 0, hook_native_ ? 1 : 0, hook_java_ ? 1 : 0);
+        init_lsplant_ = hooks_enabled_ && cfg.init_lsplant;
+        hook_java_ = init_lsplant_ && cfg.hook_java;
+        LOGI("[%s][core] match=%d enabled=%d hook_native=%d init_lsplant=%d hook_java=%d",
+             ZMOD_ID, should_inject_ ? 1 : 0, cfg.enabled ? 1 : 0, hook_native_ ? 1 : 0, init_lsplant_ ? 1 : 0, hook_java_ ? 1 : 0);
 
         if (nice_name) {
             env_->ReleaseStringUTFChars(args->nice_name, nice_name);
@@ -314,16 +318,22 @@ public:
             }
         }
 
-        if (hook_java_) {
-            LOGI("[%s][core] install java hooks...", ZMOD_ID);
+        if (init_lsplant_) {
+            LOGI("[%s][core] initializing lsplant via java_hook...", ZMOD_ID);
             if (!sample::java_hook::initialize(env_)) {
                 LOGE("[%s][core] java_hook initialize failed; stop", ZMOD_ID);
-                return;
+            } else {
+                if (hook_java_) {
+                    LOGI("[%s][core] install java hooks...", ZMOD_ID);
+                    if (!sample::java_hook::install_hooks(env_, g_dex_data)) {
+                        LOGE("[%s][core] java_hook install failed; stop", ZMOD_ID);
+                    }
+                } else {
+                    LOGI("[%s][core] hook_java_ is false, skipping dex load & install_hooks", ZMOD_ID);
+                }
             }
-            if (!sample::java_hook::install_hooks(env_, g_dex_data)) {
-                LOGE("[%s][core] java_hook install failed; stop", ZMOD_ID);
-                return;
-            }
+        } else {
+            LOGI("[%s][core] init_lsplant is false, skipping lsplant initialization and java hooks", ZMOD_ID);
         }
 
         // Install maps redirection last. After this point, /proc/self/maps may be rewritten,
@@ -352,6 +362,8 @@ public:
                 return;
             }
         }
+
+        LOGI("[%s][core] Module fully initialized and running successfully in target app.", ZMOD_ID);
     }
 
     void preServerSpecialize(zygisk::ServerSpecializeArgs * /*args*/) override {
@@ -364,6 +376,7 @@ private:
     bool         should_inject_ = false;
     bool         hooks_enabled_ = false;
     bool         hook_native_ = false;
+    bool         init_lsplant_ = false;
     bool         hook_java_ = false;
 };
 

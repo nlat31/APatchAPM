@@ -1,4 +1,4 @@
-package com.example.sample.settings;
+package com.apm.shadowso;
 
 import android.os.Bundle;
 import android.text.Editable;
@@ -25,6 +25,8 @@ public class OptionsFragment extends Fragment {
         vm = new ViewModelProvider(requireActivity()).get(SharedViewModel.class);
 
         SwitchMaterial switchEnabled = view.findViewById(R.id.switchEnabled);
+        SwitchMaterial switchInitLsplant = view.findViewById(R.id.switchInitLsplant);
+        SwitchMaterial switchJavaHook = view.findViewById(R.id.switchJavaHook);
         SwitchMaterial switchMaps = view.findViewById(R.id.switchMaps);
         SwitchMaterial switchPhdr = view.findViewById(R.id.switchPhdr);
         SwitchMaterial switchDladdr = view.findViewById(R.id.switchDladdr);
@@ -33,6 +35,8 @@ public class OptionsFragment extends Fragment {
         switchEnabled.setChecked(vm.enabled);
         Runnable updateEnabledState = () -> {
             boolean on = vm.enabled;
+            if (switchInitLsplant != null) switchInitLsplant.setEnabled(on);
+            if (switchJavaHook != null) switchJavaHook.setEnabled(on && vm.initLsplant);
             if (switchMaps != null) switchMaps.setEnabled(on);
             if (switchPhdr != null) switchPhdr.setEnabled(on);
             if (switchDladdr != null) switchDladdr.setEnabled(on);
@@ -42,6 +46,23 @@ public class OptionsFragment extends Fragment {
             vm.enabled = isChecked;
             updateEnabledState.run();
         });
+
+        if (switchInitLsplant != null) {
+            switchInitLsplant.setChecked(vm.initLsplant);
+            switchInitLsplant.setOnCheckedChangeListener((buttonView, isChecked) -> {
+                vm.initLsplant = isChecked;
+                if (!isChecked && switchJavaHook != null) {
+                    switchJavaHook.setChecked(false);
+                    vm.hookJava = false;
+                }
+                updateEnabledState.run();
+            });
+        }
+
+        if (switchJavaHook != null) {
+            switchJavaHook.setChecked(vm.hookJava);
+            switchJavaHook.setOnCheckedChangeListener((buttonView, isChecked) -> vm.hookJava = isChecked);
+        }
 
         if (editHideSo != null) {
             editHideSo.setText(vm.hideSoInput);

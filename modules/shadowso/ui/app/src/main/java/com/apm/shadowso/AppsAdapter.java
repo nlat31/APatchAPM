@@ -1,4 +1,4 @@
-package com.example.sample.settings;
+package com.apm.shadowso;
 
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
