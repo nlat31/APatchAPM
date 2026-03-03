@@ -16,6 +16,17 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#if defined(__has_include)
+#if __has_include(<android/fdsan.h>)
+#include <android/fdsan.h>
+#define SHADOWSO_HAVE_FDSAN 1
+#else
+#define SHADOWSO_HAVE_FDSAN 0
+#endif
+#else
+#define SHADOWSO_HAVE_FDSAN 0
+#endif
+
 #include <dobby.h>
 
 #include "shadow_loader.h"
@@ -44,23 +55,24 @@ static open_real_t old_open = nullptr;
 static fopen_real_t old_fopen = nullptr;
 static fopen_real_t old_fopen64 = nullptr;
 
-static inline int raw_openat(int dirfd, const char *path, int flags, mode_t mode) {
-    return (int)syscall(SYS_openat, dirfd, path, flags, mode);
-}
-static inline int raw_close(int fd) {
-    return (int)syscall(SYS_close, fd);
-}
-static inline ssize_t raw_read(int fd, void *buf, size_t n) {
-    return (ssize_t)syscall(SYS_read, fd, buf, n);
-}
-static inline ssize_t raw_write(int fd, const void *buf, size_t n) {
-    return (ssize_t)syscall(SYS_write, fd, buf, n);
-}
 #ifndef MFD_CLOEXEC
 #define MFD_CLOEXEC 0x0001U
 #endif
 
-static inline int raw_memfd_create(const char *name, unsigned int flags) {
+static inline int syscall_openat_fallback(int dirfd, const char *path, int flags, mode_t mode) {
+#ifdef SYS_openat
+    return (int)syscall(SYS_openat, dirfd, path, flags, mode);
+#else
+    (void)dirfd;
+    (void)path;
+    (void)flags;
+    (void)mode;
+    errno = ENOSYS;
+    return -1;
+#endif
+}
+
+static inline int syscall_memfd_create_fallback(const char *name, unsigned int flags) {
 #ifdef SYS_memfd_create
     return (int)syscall(SYS_memfd_create, name, flags);
 #else
@@ -71,25 +83,33 @@ static inline int raw_memfd_create(const char *name, unsigned int flags) {
 #endif
 }
 
-static inline off_t raw_lseek(int fd, off_t off, int whence) {
-#ifdef SYS_lseek
-    return (off_t)syscall(SYS_lseek, fd, off, whence);
-#elif defined(SYS__llseek)
-    // Fallback for some 32-bit archs; not expected on arm64.
-    (void)fd;
-    (void)off;
-    (void)whence;
-    errno = ENOSYS;
-    return (off_t)-1;
+static inline void fdsan_reset_owner_tag_if_possible(int fd) {
+#if SHADOWSO_HAVE_FDSAN
+    if (fd < 0) return;
+    // These are weak symbols in bionic; they may be null.
+    // fdopen() expects the fd to be unowned (tag=0) so it can claim ownership for FILE*.
+    if (!android_fdsan_exchange_owner_tag) return;
+    uint64_t cur = android_fdsan_get_owner_tag(fd);
+    if (cur != 0) {
+        android_fdsan_exchange_owner_tag(fd, cur, 0);
+    }
 #else
-    return lseek(fd, off, whence);
+    (void)fd;
 #endif
 }
 
 static bool read_text_file_raw(const char *path, std::string &out) {
     out.clear();
     if (!path || path[0] == '\0') return false;
-    int fd = raw_openat(AT_FDCWD, path, O_RDONLY | O_CLOEXEC, 0);
+    // Use libc wrapper (fdsan-aware) to avoid SIGTRAP in apps using fdsan.
+    // IMPORTANT: call the original openat (old_openat) to avoid recursing into our hook.
+    int fd = -1;
+    if (old_openat) {
+        fd = old_openat(AT_FDCWD, path, O_RDONLY | O_CLOEXEC, 0);
+    } else {
+        // Should not happen after successful install, but keep a tolerant fallback.
+        fd = syscall_openat_fallback(AT_FDCWD, path, O_RDONLY | O_CLOEXEC, 0);
+    }
     if (fd < 0) {
         LOGW("[%s][maps] failed to open maps path: %s (errno=%d)", ZMOD_ID, path, errno);
         return false;
@@ -97,17 +117,17 @@ static bool read_text_file_raw(const char *path, std::string &out) {
 
     char buf[8192];
     for (;;) {
-        ssize_t n = raw_read(fd, buf, sizeof(buf));
+        ssize_t n = ::read(fd, buf, sizeof(buf));
         if (n == 0) break;
         if (n < 0) {
-            raw_close(fd);
+            (void)::close(fd);
             LOGW("[%s][maps] failed to read maps path: %s (errno=%d)", ZMOD_ID, path, errno);
             return false;
         }
         out.append(buf, buf + n);
         if (out.size() > (8u * 1024u * 1024u)) break; // sanity cap
     }
-    raw_close(fd);
+    (void)::close(fd);
     return !out.empty();
 }
 
@@ -118,13 +138,6 @@ static bool rewrite_maps_for_shadow_modules(const std::string &content, std::str
         LOGI("[%s][maps][rewrite] no shadow modules; passthrough maps (bytes=%zu)", ZMOD_ID, content.size());
         return true; // nothing to rewrite
     }
-
-    auto find_path_start = [](const std::string &line) -> size_t {
-        size_t slash = line.find('/');
-        if (slash != std::string::npos) return slash;
-        // Some maps lines may use "[vdso]" etc; we only rewrite file-backed mappings.
-        return std::string::npos;
-    };
 
     auto parse_range = [](const std::string &line, uintptr_t &start, uintptr_t &end, int &w1, int &w2) -> bool {
         // Parse "<hex>-<hex> " at the beginning.
@@ -297,19 +310,22 @@ static bool build_rewritten_maps_for_path(const char *maps_path, std::string &ou
 
 static int create_memfd_with_content(const char *tag, const std::string &content, bool cloexec) {
     unsigned int mfd_flags = cloexec ? MFD_CLOEXEC : 0U;
-    int fd = raw_memfd_create(tag ? tag : "maps", mfd_flags);
+    // Use raw syscall for compatibility with older NDK headers, but fix up fdsan owner tag
+    // so that apps using fopen64/fdopen won't SIGTRAP in android_fdsan_exchange_owner_tag.
+    int fd = syscall_memfd_create_fallback(tag ? tag : "maps", mfd_flags);
     if (fd < 0) return -1;
+    fdsan_reset_owner_tag_if_possible(fd);
 
     size_t off = 0;
     while (off < content.size()) {
-        ssize_t n = raw_write(fd, content.data() + off, content.size() - off);
+        ssize_t n = ::write(fd, content.data() + off, content.size() - off);
         if (n <= 0) {
-            raw_close(fd);
+            (void)::close(fd);
             return -1;
         }
         off += (size_t)n;
     }
-    (void)raw_lseek(fd, 0, SEEK_SET);
+    (void)::lseek(fd, 0, SEEK_SET);
     return fd;
 }
 
@@ -450,7 +466,7 @@ static FILE *new_fopen(const char *pathname, const char *mode) {
                         LOGI("[%s][maps] successfully returned spoofed maps (FILE*) for fopen", ZMOD_ID);
                         return fp;
                     }
-                    raw_close(mfd);
+                    (void)::close(mfd);
                 }
             }
         }
@@ -476,7 +492,7 @@ static FILE *new_fopen64(const char *pathname, const char *mode) {
                         LOGI("[%s][maps] successfully returned spoofed maps (FILE*) for fopen64", ZMOD_ID);
                         return fp;
                     }
-                    raw_close(mfd);
+                    (void)::close(mfd);
                 }
             }
         }
