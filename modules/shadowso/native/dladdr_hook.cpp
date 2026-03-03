@@ -1,4 +1,5 @@
 #include "dladdr_hook.h"
+#include "native_hook.h"
 
 #include <android/log.h>
 #include <cstdint>
@@ -85,10 +86,10 @@ static int new_dladdr(const void *addr, Dl_info *info) {
 }
 
 static void *resolve_sym(const char *sym) {
-    void *p = dlsym(RTLD_DEFAULT, sym);
+    void *p = sample::native_hook::get_real_dlsym(RTLD_DEFAULT, sym);
     if (p) return p;
     void *libc = dlopen("libc.so", RTLD_NOW);
-    if (libc) p = dlsym(libc, sym);
+    if (libc) p = sample::native_hook::get_real_dlsym(libc, sym);
     return p;
 }
 

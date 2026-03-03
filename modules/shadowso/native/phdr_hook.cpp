@@ -1,4 +1,5 @@
 #include "phdr_hook.h"
+#include "native_hook.h"
 
 #include <android/log.h>
 #include <atomic>
@@ -140,10 +141,10 @@ static int new_dl_iterate_phdr(int (*callback)(struct dl_phdr_info *, size_t, vo
 }
 
 static void *resolve_sym(const char *sym) {
-    void *p = dlsym(RTLD_DEFAULT, sym);
+    void *p = sample::native_hook::get_real_dlsym(RTLD_DEFAULT, sym);
     if (p) return p;
     void *libc = dlopen("libc.so", RTLD_NOW);
-    if (libc) p = dlsym(libc, sym);
+    if (libc) p = sample::native_hook::get_real_dlsym(libc, sym);
     return p;
 }
 

@@ -1,4 +1,5 @@
 #include "maps_hook.h"
+#include "native_hook.h"
 
 #include <android/log.h>
 #include <cctype>
@@ -457,11 +458,11 @@ static FILE *new_fopen64(const char *pathname, const char *mode) {
 }
 
 static void *resolve_sym(const char *sym) {
-    void *p = dlsym(RTLD_DEFAULT, sym);
+    void *p = sample::native_hook::get_real_dlsym(RTLD_DEFAULT, sym);
     if (p) return p;
     void *libc = dlopen("libc.so", RTLD_NOW);
     if (libc) {
-        p = dlsym(libc, sym);
+        p = sample::native_hook::get_real_dlsym(libc, sym);
     }
     return p;
 }

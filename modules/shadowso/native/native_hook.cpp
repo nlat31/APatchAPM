@@ -111,7 +111,51 @@ static void *hooked_dlsym(void *handle, const char *symbol) {
     if (symbol) {
         void *shadow_ret = sample::shadow_loader::get_shadow_symbol(symbol);
         if (shadow_ret) {
-            LOGI("[%s][dlsym] resolved symbol %s from shadow modules -> %p", ZMOD_ID, symbol, shadow_ret);
+            // Shadow-hit path used to early-return without enough context. Add diagnostics:
+            // caller module, returned addr range tag, and rate-limit to avoid log spam.
+            static std::atomic<uint64_t> g_shadow_hits{0};
+            static std::atomic<int> g_shadow_log_budget{300};
+            const uint64_t hn = g_shadow_hits.fetch_add(1, std::memory_order_relaxed) + 1;
+            int left = g_shadow_log_budget.fetch_sub(1, std::memory_order_relaxed);
+
+            const void *caller = __builtin_return_address(0);
+            const uintptr_t a = reinterpret_cast<uintptr_t>(shadow_ret);
+            const auto mods = sample::shadow_loader::snapshot_modules();
+            const sample::shadow_loader::ShadowModuleInfo *hit = nullptr;
+            const char *which = nullptr;
+            for (const auto &m : mods) {
+                const char *tag = range_tag_for_addr(a, m);
+                if (tag) {
+                    hit = &m;
+                    which = tag;
+                    break;
+                }
+            }
+
+            Dl_info di_ret{};
+            Dl_info di_caller{};
+            (void)dladdr(shadow_ret, &di_ret);
+            (void)dladdr(caller, &di_caller);
+
+            if (left > 0) {
+                LOGI("[%s][dlsym][shadow] #%llu handle=%p symbol=%s -> %p hit=%s/%s caller=%p (%s/%s) ret_dladdr=(%s/%s base=%p saddr=%p)",
+                     ZMOD_ID,
+                     (unsigned long long)hn,
+                     handle,
+                     symbol ? symbol : "<null>",
+                     shadow_ret,
+                     hit ? hit->name_lower.c_str() : "no",
+                     which ? which : "-",
+                     caller,
+                     di_caller.dli_fname ? di_caller.dli_fname : "?",
+                     di_caller.dli_sname ? di_caller.dli_sname : "?",
+                     di_ret.dli_fname ? di_ret.dli_fname : "?",
+                     di_ret.dli_sname ? di_ret.dli_sname : "?",
+                     di_ret.dli_fbase,
+                     di_ret.dli_saddr);
+            } else if ((hn % 1000) == 0) {
+                LOGI("[%s][dlsym][shadow] hits=%llu (log_budget exhausted)", ZMOD_ID, (unsigned long long)hn);
+            }
             return shadow_ret;
         }
     }
@@ -178,6 +222,12 @@ static void *resolve_dlsym() {
         if (sym) return sym;
     }
     return nullptr;
+}
+
+void *get_real_dlsym(void *handle, const char *symbol) {
+    // If we've hooked dlsym, prefer calling the original (unhooked) implementation.
+    if (orig_dlsym) return orig_dlsym(handle, symbol);
+    return dlsym(handle, symbol);
 }
 
 bool install_hooks(const std::vector<std::string> &hide_so) {

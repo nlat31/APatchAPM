@@ -77,6 +77,12 @@ static std::atomic<size_t> g_shadow_bounds_count{0};
 static struct sigaction old_sa_segv;
 
 static void segv_handler(int sig, siginfo_t *info, void *context) {
+    // Diagnostic counters for "shadow execution -> SIGSEGV -> redirect to orig".
+    // Rate-limited to avoid log spam and extra overhead.
+    static std::atomic<uint64_t> g_segv_total{0};
+    static std::atomic<uint64_t> g_segv_handled{0};
+    static std::atomic<int> g_segv_log_budget{200};
+
     ucontext_t *uc = (ucontext_t *)context;
     
 #if defined(__aarch64__)
@@ -91,12 +97,35 @@ static void segv_handler(int sig, siginfo_t *info, void *context) {
     uintptr_t fault_pc = 0;
 #endif
 
+    (void)info;
+    const uint64_t total_n = g_segv_total.fetch_add(1, std::memory_order_relaxed) + 1;
+
     if (fault_pc != 0) {
         size_t count = g_shadow_bounds_count.load(std::memory_order_acquire);
         for (size_t i = 0; i < count; i++) {
             if (fault_pc >= g_shadow_bounds[i].shadow_start && fault_pc < g_shadow_bounds[i].shadow_end) {
                 uintptr_t offset = fault_pc - g_shadow_bounds[i].shadow_start;
                 uintptr_t real_pc = g_shadow_bounds[i].orig_base + offset;
+                const uint64_t handled_n = g_segv_handled.fetch_add(1, std::memory_order_relaxed) + 1;
+
+                int left = g_segv_log_budget.fetch_sub(1, std::memory_order_relaxed);
+                if (left > 0) {
+                    LOGW("[%s][shadow][segv] total=%llu handled=%llu shadow_pc=%p -> orig_pc=%p (shadow=[%p-%p] orig_base=%p off=0x%lx)",
+                         ZMOD_ID,
+                         (unsigned long long)total_n,
+                         (unsigned long long)handled_n,
+                         (void *)fault_pc,
+                         (void *)real_pc,
+                         (void *)g_shadow_bounds[i].shadow_start,
+                         (void *)g_shadow_bounds[i].shadow_end,
+                         (void *)g_shadow_bounds[i].orig_base,
+                         (unsigned long)offset);
+                } else if ((handled_n % 2000) == 0) {
+                    LOGW("[%s][shadow][segv] handled=%llu total=%llu (log_budget exhausted)",
+                         ZMOD_ID,
+                         (unsigned long long)handled_n,
+                         (unsigned long long)total_n);
+                }
                 
 #if defined(__aarch64__)
                 uc->uc_mcontext.pc = real_pc;
