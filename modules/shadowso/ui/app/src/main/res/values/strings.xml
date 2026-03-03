@@ -11,7 +11,7 @@
     <string name="opt_maps_redirect">Maps redirect</string>
     <string name="opt_hook_phdr">Intercept module enumeration (dl_iterate_phdr)</string>
     <string name="opt_hook_dladdr">Intercept dladdr</string>
-    <string name="hide_so_label">Hide hooks on SOs</string>
+    <string name="hide_so_label">Shadow target SOs</string>
     <string name="hide_so_helper">Separate multiple SO names with one or more spaces.</string>
     <string name="hide_so_default">libc.so libart.so</string>
     <string name="root_required">Root permission is required to read/write /data/adb.</string>

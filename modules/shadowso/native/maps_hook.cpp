@@ -1,5 +1,4 @@
 #include "maps_hook.h"
-#include "native_hook.h"
 
 #include <android/log.h>
 #include <cctype>
@@ -207,7 +206,7 @@ static bool rewrite_maps_for_shadow_modules(const std::string &content, std::str
             continue;
         }
 
-        // IMPORTANT: orig_base must only come from shadow_loader's earliest traversal/do_dlopen chain.
+        // IMPORTANT: orig_base must only come from shadow_loader's earliest traversal.
         // Do NOT infer it from /proc/self/maps here (that can be ambiguous once shadows exist).
         if (match->orig_base == 0 || match->orig_size == 0 || match->shadow_base == 0) {
             skipped_lines_by_mod[match->name_lower] += 1;
@@ -354,14 +353,37 @@ static mode_t extract_mode_if_needed(int flags, va_list ap) {
     return 0;
 }
 
+static bool should_log_open_path(const char *path) {
+    if (!path) return false;
+    // Avoid huge spam from normal app I/O. Focus on proc/sys paths and app's lib dir.
+    if (std::strncmp(path, "/proc/", 6) == 0) return true;
+    if (std::strncmp(path, "/sys/", 5) == 0) return true;
+    if (!g_pkg.empty()) {
+        // Best-effort: log accesses under the app's /data/.../<pkg>/ tree.
+        if (std::strstr(path, g_pkg.c_str()) != nullptr) return true;
+    }
+    return false;
+}
+
+static void log_open_path_rate_limited(const char *api, const char *path) {
+    static std::atomic<int> g_budget{800};
+    int left = g_budget.fetch_sub(1, std::memory_order_relaxed);
+    if (left > 0) {
+        LOGI("[%s][maps][open] %s: %s", ZMOD_ID, api, path ? path : "null");
+    } else if (left == 0) {
+        LOGW("[%s][maps][open] log budget exhausted", ZMOD_ID);
+    }
+}
+
 static int new_openat(int dirfd, const char *pathname, int flags, ...) {
     va_list ap;
     va_start(ap, flags);
     mode_t mode = extract_mode_if_needed(flags, ap);
     va_end(ap);
 
-    // Logging all paths can be spammy, but useful for debugging what the app is checking
-    // LOGI("[%s][maps] openat: %s", ZMOD_ID, pathname ? pathname : "null");
+    if (should_log_open_path(pathname)) {
+        log_open_path_rate_limited("openat", pathname);
+    }
 
     if (is_current_maps_path(pathname) && old_openat) {
         LOGI("[%s][maps] intercepted openat for maps: %s", ZMOD_ID, pathname);
@@ -388,7 +410,9 @@ static int new_open(const char *pathname, int flags, ...) {
     mode_t mode = extract_mode_if_needed(flags, ap);
     va_end(ap);
 
-    // LOGI("[%s][maps] open: %s", ZMOD_ID, pathname ? pathname : "null");
+    if (should_log_open_path(pathname)) {
+        log_open_path_rate_limited("open", pathname);
+    }
 
     if (is_current_maps_path(pathname) && old_open) {
         LOGI("[%s][maps] intercepted open for maps: %s", ZMOD_ID, pathname);
@@ -409,7 +433,9 @@ static int new_open(const char *pathname, int flags, ...) {
 }
 
 static FILE *new_fopen(const char *pathname, const char *mode) {
-    // LOGI("[%s][maps] fopen: %s", ZMOD_ID, pathname ? pathname : "null");
+    if (should_log_open_path(pathname)) {
+        log_open_path_rate_limited("fopen", pathname);
+    }
 
     if (is_current_maps_path(pathname) && old_fopen) {
         LOGI("[%s][maps] intercepted fopen for maps: %s", ZMOD_ID, pathname);
@@ -434,7 +460,9 @@ static FILE *new_fopen(const char *pathname, const char *mode) {
 }
 
 static FILE *new_fopen64(const char *pathname, const char *mode) {
-    // LOGI("[%s][maps] fopen64: %s", ZMOD_ID, pathname ? pathname : "null");
+    if (should_log_open_path(pathname)) {
+        log_open_path_rate_limited("fopen64", pathname);
+    }
 
     if (is_current_maps_path(pathname) && old_fopen64) {
         LOGI("[%s][maps] intercepted fopen64 for maps: %s", ZMOD_ID, pathname);
@@ -458,11 +486,11 @@ static FILE *new_fopen64(const char *pathname, const char *mode) {
 }
 
 static void *resolve_sym(const char *sym) {
-    void *p = sample::native_hook::get_real_dlsym(RTLD_DEFAULT, sym);
+    void *p = dlsym(RTLD_DEFAULT, sym);
     if (p) return p;
     void *libc = dlopen("libc.so", RTLD_NOW);
     if (libc) {
-        p = sample::native_hook::get_real_dlsym(libc, sym);
+        p = dlsym(libc, sym);
     }
     return p;
 }

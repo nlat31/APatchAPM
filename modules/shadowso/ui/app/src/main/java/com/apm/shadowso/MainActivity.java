@@ -74,7 +74,6 @@ public class MainActivity extends AppCompatActivity {
             List<String> hideSo = parseSoList(vm.hideSoInput);
             ConfigStore.Config cfg = new ConfigStore.Config(
                 vm.enabled,
-                true,
                 vm.initLsplant,
                 vm.hookJava,
                 vm.optMapsRedirect,

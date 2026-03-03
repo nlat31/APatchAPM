@@ -5,7 +5,6 @@
 #include <cctype>
 #include <cstdint>
 #include <cstring>
-#include <cerrno>
 #include <dlfcn.h>
 #include <link.h>
 #include <mutex>
@@ -14,19 +13,12 @@
 #include <unordered_set>
 #include <vector>
 #include <atomic>
-#include <signal.h>
-#include <ucontext.h>
-#include <sys/mman.h>
 
 #include <dobby.h>
 
 #include <csoloader.h>
 
 #include "elf_util.h"
-
-#include <fcntl.h>
-#include <sys/syscall.h>
-#include <unistd.h>
 
 #ifndef ZMOD_ID
 #define ZMOD_ID "shadowso"
@@ -66,160 +58,6 @@ static uintptr_t g_linker_base = 0;
 
 // Keep CSOLoader instances alive for the entire process lifetime.
 static std::vector<csoloader *> g_shadow_libs;
-
-struct ShadowBound {
-    uintptr_t shadow_start;
-    uintptr_t shadow_end;
-    uintptr_t orig_base;
-};
-static ShadowBound g_shadow_bounds[32];
-static std::atomic<size_t> g_shadow_bounds_count{0};
-static struct sigaction old_sa_segv;
-
-static void segv_handler(int sig, siginfo_t *info, void *context) {
-    // Diagnostic counters for "shadow execution -> SIGSEGV -> redirect to orig".
-    // Rate-limited to avoid log spam and extra overhead.
-    static std::atomic<uint64_t> g_segv_total{0};
-    static std::atomic<uint64_t> g_segv_handled{0};
-    static std::atomic<int> g_segv_log_budget{200};
-
-    ucontext_t *uc = (ucontext_t *)context;
-    
-#if defined(__aarch64__)
-    uintptr_t fault_pc = uc->uc_mcontext.pc;
-#elif defined(__arm__)
-    uintptr_t fault_pc = uc->uc_mcontext.arm_pc;
-#elif defined(__i386__)
-    uintptr_t fault_pc = uc->uc_mcontext.gregs[REG_EIP];
-#elif defined(__x86_64__)
-    uintptr_t fault_pc = uc->uc_mcontext.gregs[REG_RIP];
-#else
-    uintptr_t fault_pc = 0;
-#endif
-
-    (void)info;
-    const uint64_t total_n = g_segv_total.fetch_add(1, std::memory_order_relaxed) + 1;
-
-    if (fault_pc != 0) {
-        size_t count = g_shadow_bounds_count.load(std::memory_order_acquire);
-        for (size_t i = 0; i < count; i++) {
-            if (fault_pc >= g_shadow_bounds[i].shadow_start && fault_pc < g_shadow_bounds[i].shadow_end) {
-                uintptr_t offset = fault_pc - g_shadow_bounds[i].shadow_start;
-                uintptr_t real_pc = g_shadow_bounds[i].orig_base + offset;
-                const uint64_t handled_n = g_segv_handled.fetch_add(1, std::memory_order_relaxed) + 1;
-
-                int left = g_segv_log_budget.fetch_sub(1, std::memory_order_relaxed);
-                if (left > 0) {
-                    LOGW("[%s][shadow][segv] total=%llu handled=%llu shadow_pc=%p -> orig_pc=%p (shadow=[%p-%p] orig_base=%p off=0x%lx)",
-                         ZMOD_ID,
-                         (unsigned long long)total_n,
-                         (unsigned long long)handled_n,
-                         (void *)fault_pc,
-                         (void *)real_pc,
-                         (void *)g_shadow_bounds[i].shadow_start,
-                         (void *)g_shadow_bounds[i].shadow_end,
-                         (void *)g_shadow_bounds[i].orig_base,
-                         (unsigned long)offset);
-                } else if ((handled_n % 2000) == 0) {
-                    LOGW("[%s][shadow][segv] handled=%llu total=%llu (log_budget exhausted)",
-                         ZMOD_ID,
-                         (unsigned long long)handled_n,
-                         (unsigned long long)total_n);
-                }
-                
-#if defined(__aarch64__)
-                uc->uc_mcontext.pc = real_pc;
-#elif defined(__arm__)
-                uc->uc_mcontext.arm_pc = real_pc;
-#elif defined(__i386__)
-                uc->uc_mcontext.gregs[REG_EIP] = real_pc;
-#elif defined(__x86_64__)
-                uc->uc_mcontext.gregs[REG_RIP] = real_pc;
-#endif
-                return; // Resume execution at the real library
-            }
-        }
-    }
-
-    // Not handled by us, call original handler
-    if (old_sa_segv.sa_flags & SA_SIGINFO) {
-        if (old_sa_segv.sa_sigaction) {
-            old_sa_segv.sa_sigaction(sig, info, context);
-        } else {
-            struct sigaction dfl;
-            sigaction(SIGSEGV, nullptr, &dfl);
-            dfl.sa_handler = SIG_DFL;
-            sigaction(SIGSEGV, &dfl, nullptr);
-        }
-    } else {
-        if (old_sa_segv.sa_handler == SIG_DFL || old_sa_segv.sa_handler == SIG_IGN) {
-            struct sigaction dfl;
-            sigaction(SIGSEGV, nullptr, &dfl);
-            dfl.sa_handler = SIG_DFL;
-            sigaction(SIGSEGV, &dfl, nullptr);
-        } else if (old_sa_segv.sa_handler) {
-            old_sa_segv.sa_handler(sig);
-        }
-    }
-}
-
-static void install_segv_handler() {
-    static bool installed = false;
-    if (installed) return;
-    struct sigaction sa;
-    std::memset(&sa, 0, sizeof(sa));
-    sa.sa_sigaction = segv_handler;
-    sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
-    sigaction(SIGSEGV, &sa, &old_sa_segv);
-    installed = true;
-}
-
-using sigaction_t = int (*)(int, const struct sigaction*, struct sigaction*);
-static sigaction_t orig_sigaction = nullptr;
-
-static int hooked_sigaction(int signum, const struct sigaction *act, struct sigaction *oldact) {
-    if (signum == SIGSEGV) {
-        if (oldact) {
-            *oldact = old_sa_segv;
-        }
-        if (act) {
-            old_sa_segv = *act;
-        }
-        return 0; // successfully swallowed
-    }
-    return orig_sigaction ? orig_sigaction(signum, act, oldact) : -1;
-}
-
-// Bionic has sigaction64 since Android API 28
-using sigaction64_t = int (*)(int, const void*, void*);
-static sigaction64_t orig_sigaction64 = nullptr;
-
-static int hooked_sigaction64(int signum, const void *act, void *oldact) {
-    if (signum == SIGSEGV) {
-        // Technically struct sigaction and struct sigaction64 are distinct types in Bionic
-        // but for our purposes of completely swallowing the crash handler, doing a naive
-        // blind copy of whatever the app tries to install works perfectly.
-        if (oldact) {
-            std::memcpy(oldact, &old_sa_segv, sizeof(old_sa_segv)); // Approximation, layout matches usually
-        }
-        if (act) {
-            std::memcpy(&old_sa_segv, act, sizeof(old_sa_segv));
-        }
-        return 0; // successfully swallowed
-    }
-    return orig_sigaction64 ? orig_sigaction64(signum, act, oldact) : -1;
-}
-
-static void install_sigaction_hook() {
-    void *sa = dlsym(RTLD_DEFAULT, "sigaction");
-    if (sa) {
-        DobbyHook(sa, (void*)hooked_sigaction, (void**)&orig_sigaction);
-    }
-    void *sa64 = dlsym(RTLD_DEFAULT, "sigaction64");
-    if (sa64) {
-        DobbyHook(sa64, (void*)hooked_sigaction64, (void**)&orig_sigaction64);
-    }
-}
 
 static std::string to_lower(std::string s) {
     for (auto &ch : s) ch = (char)std::tolower((unsigned char)ch);
@@ -387,21 +225,7 @@ static bool shadow_load_path_locked(const std::string &target_lower, const std::
         info.orig_path = path;
     }
 
-    if (map_only && info.orig_base != 0 && info.shadow_base != 0) {
-        size_t idx = g_shadow_bounds_count.load(std::memory_order_relaxed);
-        if (idx < 32) {
-            g_shadow_bounds[idx] = {
-                info.shadow_base,
-                info.shadow_base + info.shadow_size,
-                info.orig_base
-            };
-            g_shadow_bounds_count.store(idx + 1, std::memory_order_release);
-        }
-        
-        // Strip PROT_EXEC to force a SIGSEGV when executed.
-        // We do this to catch execution attempts and redirect them to the real library.
-        mprotect(reinterpret_cast<void*>(info.shadow_base), info.shadow_size, PROT_READ);
-    }
+    // Note: per request, we no longer use SIGSEGV-based execution redirection.
 
     LOGI("[%s][shadow] loaded %s (orig=%s base=0x%lx size=0x%zx, shadow=%s base=0x%lx size=0x%zx)",
          ZMOD_ID,
@@ -415,7 +239,7 @@ static bool shadow_load_path_locked(const std::string &target_lower, const std::
     return true;
 }
 
-// ---------------- do_dlopen hook ----------------
+// ---------------- do_dlopen hook (late-load shadow) ----------------
 using do_dlopen_t = void *(*)(const char *name, int flags, const android_dlextinfo *extinfo, const void *caller_addr);
 static do_dlopen_t old_do_dlopen = nullptr;
 
@@ -517,6 +341,9 @@ bool initialize(const std::vector<std::string> &so_names) {
     g_orig_by_basename.clear();
     g_linker_path.clear();
     g_linker_base = 0;
+    g_dlopen_hook_installed = false;
+    g_do_dlopen_target = nullptr;
+    old_do_dlopen = nullptr;
 
     // Normalize to lowercase for case-insensitive substring match.
     for (const auto &s : so_names) {
@@ -542,10 +369,6 @@ bool initialize(const std::vector<std::string> &so_names) {
     // Snapshot loaded modules once, right after fork. Do not read /proc/self/maps.
     (void)snapshot_targets_from_dl_iterate_phdr_locked();
 
-    // Install SEGV handler to catch map_only decoy execution
-    install_segv_handler();
-    install_sigaction_hook();
-
     // Shadow-load all targets we enumerated in the snapshot.
     std::unordered_set<std::string> pending = g_targets;
     for (const auto &t : g_targets) {
@@ -560,8 +383,6 @@ bool initialize(const std::vector<std::string> &so_names) {
         pending.erase(t);
     }
 
-    // If something is still missing, hook do_dlopen so we can shadow-load it immediately
-    // after it gets loaded by the app/runtime.
     if (!pending.empty()) {
         LOGW("[%s][shadow] pending targets=%zu; install do_dlopen hook for late-load", ZMOD_ID, pending.size());
         (void)install_do_dlopen_hook_locked();
@@ -595,17 +416,6 @@ bool get_orig_module_info(const std::string &basename_lower, std::string &out_pa
     out_path = it->second.path;
     out_base = it->second.base;
     return !out_path.empty() && out_base != 0;
-}
-
-void *get_shadow_symbol(const char *symbol_name) {
-    if (!symbol_name) return nullptr;
-    std::lock_guard<std::mutex> lk(g_mu);
-    for (auto *lib : g_shadow_libs) {
-        if (!lib) continue;
-        void *sym = csoloader_get_symbol(lib, symbol_name);
-        if (sym) return sym;
-    }
-    return nullptr;
 }
 
 } // namespace shadow_loader

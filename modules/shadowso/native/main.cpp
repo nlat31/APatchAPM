@@ -7,7 +7,6 @@
 #include <android/log.h>
 
 #include "zygisk.hpp"
-#include "native_hook.h"
 #include "java_hook.h"
 #include "shadow_loader.h"
 #include "maps_hook.h"
@@ -33,7 +32,6 @@ static std::vector<uint8_t> g_dex_data;
 
 struct ModuleConfig {
     bool enabled = false;
-    bool hook_native = false;
     bool init_lsplant = false;
     bool hook_java = false;
     bool opt_maps_redirect = false;
@@ -196,8 +194,6 @@ static const ModuleConfig &load_config_cached() {
     next.loaded = true;
     next.mtime = st.st_mtime;
     next.enabled = parse_bool_by_key(json, "enabled", false);
-    // If user didn't write hook_native/hook_java, default to enabled.
-    next.hook_native = next.enabled && parse_bool_by_key(json, "hook_native", false);
     next.init_lsplant = next.enabled && parse_bool_by_key(json, "init_lsplant", false);
     next.hook_java = next.init_lsplant && parse_bool_by_key(json, "hook_java", false);
     next.opt_maps_redirect = parse_bool_by_key(json, "opt_maps_redirect", false);
@@ -261,11 +257,10 @@ public:
         // (UI can toggle "show system apps" and write them into packages.)
         should_inject_ = matches_any_package(proc, cfg.packages);
         hooks_enabled_ = should_inject_ && cfg.enabled;
-        hook_native_ = hooks_enabled_ && cfg.hook_native;
         init_lsplant_ = hooks_enabled_ && cfg.init_lsplant;
         hook_java_ = init_lsplant_ && cfg.hook_java;
-        LOGI("[%s][core] match=%d enabled=%d hook_native=%d init_lsplant=%d hook_java=%d",
-             ZMOD_ID, should_inject_ ? 1 : 0, cfg.enabled ? 1 : 0, hook_native_ ? 1 : 0, init_lsplant_ ? 1 : 0, hook_java_ ? 1 : 0);
+        LOGI("[%s][core] match=%d enabled=%d init_lsplant=%d hook_java=%d",
+             ZMOD_ID, should_inject_ ? 1 : 0, cfg.enabled ? 1 : 0, init_lsplant_ ? 1 : 0, hook_java_ ? 1 : 0);
 
         if (nice_name) {
             env_->ReleaseStringUTFChars(args->nice_name, nice_name);
@@ -306,14 +301,6 @@ public:
             LOGI("[%s][core] install dladdr hook...", ZMOD_ID);
             if (!sample::dladdr_hook::install()) {
                 LOGE("[%s][core] dladdr_hook install failed; stop", ZMOD_ID);
-                return;
-            }
-        }
-
-        if (hook_native_) {
-            LOGI("[%s][core] install native hooks...", ZMOD_ID);
-            if (!sample::native_hook::install_hooks(cfg.hide_so)) {
-                LOGE("[%s][core] native hooks install failed; stop", ZMOD_ID);
                 return;
             }
         }
@@ -375,7 +362,6 @@ private:
     JNIEnv      *env_ = nullptr;
     bool         should_inject_ = false;
     bool         hooks_enabled_ = false;
-    bool         hook_native_ = false;
     bool         init_lsplant_ = false;
     bool         hook_java_ = false;
 };

@@ -20,7 +20,6 @@ public final class ConfigStore {
 
     public static final class Config {
         public final boolean enabled;
-        public final boolean hookNative;
         public final boolean initLsplant;
         public final boolean hookJava;
         public final boolean optMapsRedirect;
@@ -30,7 +29,6 @@ public final class ConfigStore {
         public final List<String> hideSo; // nullable: null means "not set in config"
 
         public Config(boolean enabled,
-                      boolean hookNative,
                       boolean initLsplant,
                       boolean hookJava,
                       boolean optMapsRedirect,
@@ -39,7 +37,6 @@ public final class ConfigStore {
                       Set<String> packages,
                       List<String> hideSo) {
             this.enabled = enabled;
-            this.hookNative = hookNative;
             this.initLsplant = initLsplant;
             this.hookJava = hookJava;
             this.optMapsRedirect = optMapsRedirect;
@@ -81,11 +78,9 @@ public final class ConfigStore {
             }
 
             boolean enabled = obj.optBoolean("enabled", false);
-            boolean hookNative = obj.optBoolean("hook_native", false);
             boolean initLsplant = obj.optBoolean("init_lsplant", false);
             boolean hookJava = obj.optBoolean("hook_java", false);
             if (!enabled) {
-                hookNative = false;
                 initLsplant = false;
                 hookJava = false;
             }
@@ -94,7 +89,7 @@ public final class ConfigStore {
             boolean optHookPhdr = obj.optBoolean("opt_hook_phdr", false);
             boolean optHookDladdr = obj.optBoolean("opt_hook_dladdr", false);
 
-            return new Config(enabled, hookNative, initLsplant, hookJava, optMapsRedirect, optHookPhdr, optHookDladdr, pkgs, hide);
+            return new Config(enabled, initLsplant, hookJava, optMapsRedirect, optHookPhdr, optHookDladdr, pkgs, hide);
         } catch (Throwable t) {
             return null;
         }
@@ -105,7 +100,6 @@ public final class ConfigStore {
             JSONObject obj = new JSONObject();
             obj.put("version", 2);
             obj.put("enabled", cfg != null && cfg.enabled);
-            obj.put("hook_native", cfg != null && cfg.enabled && cfg.hookNative);
             obj.put("init_lsplant", cfg != null && cfg.enabled && cfg.initLsplant);
             obj.put("hook_java", cfg != null && cfg.enabled && cfg.hookJava);
             obj.put("opt_maps_redirect", cfg != null && cfg.optMapsRedirect);
