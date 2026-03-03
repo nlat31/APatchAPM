@@ -39,6 +39,9 @@ std::vector<ShadowModuleInfo> snapshot_modules();
 // `basename_lower` should be like "libart.so" / "linker64".
 bool get_orig_module_info(const std::string &basename_lower, std::string &out_path, uintptr_t &out_base);
 
+// Look up a symbol in all shadow modules
+void *get_shadow_symbol(const char *symbol_name);
+
 } // namespace shadow_loader
 } // namespace sample
 

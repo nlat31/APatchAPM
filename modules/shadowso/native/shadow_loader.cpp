@@ -568,6 +568,17 @@ bool get_orig_module_info(const std::string &basename_lower, std::string &out_pa
     return !out_path.empty() && out_base != 0;
 }
 
+void *get_shadow_symbol(const char *symbol_name) {
+    if (!symbol_name) return nullptr;
+    std::lock_guard<std::mutex> lk(g_mu);
+    for (auto *lib : g_shadow_libs) {
+        if (!lib) continue;
+        void *sym = csoloader_get_symbol(lib, symbol_name);
+        if (sym) return sym;
+    }
+    return nullptr;
+}
+
 } // namespace shadow_loader
 } // namespace sample
 

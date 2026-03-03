@@ -4,12 +4,15 @@
 #include <cctype>
 #include <cstring>
 #include <dlfcn.h>
+#include <atomic>
 #include <android/log.h>
 #include <dobby.h>
 
 #ifndef ZMOD_ID
 #define ZMOD_ID "shadowso"
 #endif
+
+#include "shadow_loader.h"
 
 #define LOG_TAG    "shadowso"
 #define LOGI(...)  __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
@@ -84,6 +87,99 @@ static void *resolve_android_dlopen_ext() {
     return nullptr;
 }
 
+// ---------------- dlsym hook (shadow-lookup + logging) ----------------
+using dlsym_t = void *(*)(void *handle, const char *symbol);
+static dlsym_t orig_dlsym = nullptr;
+
+static const char *range_tag_for_addr(uintptr_t addr, const sample::shadow_loader::ShadowModuleInfo &m) {
+    if (m.orig_base != 0 && m.orig_size != 0) {
+        const uintptr_t ob = m.orig_base;
+        const uintptr_t oe = ob + (uintptr_t)m.orig_size;
+        if (addr >= ob && addr < oe) return "orig";
+    }
+    if (m.shadow_base != 0 && m.shadow_size != 0) {
+        const uintptr_t sb = m.shadow_base;
+        const uintptr_t se = sb + (uintptr_t)m.shadow_size;
+        if (addr >= sb && addr < se) return "shadow";
+    }
+    return nullptr;
+}
+
+static void *hooked_dlsym(void *handle, const char *symbol) {
+    if (!orig_dlsym) return nullptr;
+
+    if (symbol) {
+        void *shadow_ret = sample::shadow_loader::get_shadow_symbol(symbol);
+        if (shadow_ret) {
+            LOGI("[%s][dlsym] resolved symbol %s from shadow modules -> %p", ZMOD_ID, symbol, shadow_ret);
+            return shadow_ret;
+        }
+    }
+
+    void *ret = orig_dlsym(handle, symbol);
+
+    // Avoid unbounded spam; log first N calls only.
+    static std::atomic<uint64_t> g_calls{0};
+    static std::atomic<int> g_log_budget{500};
+    const uint64_t n = g_calls.fetch_add(1, std::memory_order_relaxed) + 1;
+    int left = g_log_budget.fetch_sub(1, std::memory_order_relaxed);
+    if (left <= 0) return ret;
+
+    const void *caller = __builtin_return_address(0);
+
+    const uintptr_t a = reinterpret_cast<uintptr_t>(ret);
+    const auto mods = sample::shadow_loader::snapshot_modules();
+    const sample::shadow_loader::ShadowModuleInfo *hit = nullptr;
+    const char *which = nullptr;
+    for (const auto &m : mods) {
+        const char *tag = range_tag_for_addr(a, m);
+        if (tag) {
+            hit = &m;
+            which = tag;
+            break;
+        }
+    }
+
+    Dl_info di_ret{};
+    Dl_info di_caller{};
+    (void)dladdr(ret, &di_ret);
+    (void)dladdr(caller, &di_caller);
+
+    LOGI("[%s][dlsym] #%llu handle=%p symbol=%s -> %p shadow_hit=%s/%s caller=%p (%s/%s)",
+         ZMOD_ID,
+         (unsigned long long)n,
+         handle,
+         symbol ? symbol : "<null>",
+         ret,
+         hit ? hit->name_lower.c_str() : "no",
+         which ? which : "-",
+         caller,
+         di_caller.dli_fname ? di_caller.dli_fname : "?",
+         di_caller.dli_sname ? di_caller.dli_sname : "?");
+
+    if (ret && (di_ret.dli_fname || di_ret.dli_sname)) {
+        LOGI("[%s][dlsym]    ret_dladdr: fname=%s sname=%s fbase=%p saddr=%p",
+             ZMOD_ID,
+             di_ret.dli_fname ? di_ret.dli_fname : "?",
+             di_ret.dli_sname ? di_ret.dli_sname : "?",
+             di_ret.dli_fbase,
+             di_ret.dli_saddr);
+    }
+    return ret;
+}
+
+static void *resolve_dlsym() {
+    // Called before installing the hook; dlsym is still original here.
+    void *sym = dlsym(RTLD_DEFAULT, "dlsym");
+    if (sym) return sym;
+    void *libdl = dlopen("libdl.so", RTLD_NOW);
+    if (libdl) {
+        sym = dlsym(libdl, "dlsym");
+        if (sym) return sym;
+    }
+    return nullptr;
+}
+
 bool install_hooks(const std::vector<std::string> &hide_so) {
     LOGI("[%s][native] installing hooks...", ZMOD_ID);
     g_hide_so.clear();
@@ -103,11 +199,25 @@ bool install_hooks(const std::vector<std::string> &hide_so) {
     if (DobbyHook(target, to_void_ptr(hooked_android_dlopen_ext), &orig) == 0 && orig) {
         orig_android_dlopen_ext = reinterpret_cast<android_dlopen_ext_t>(orig);
         LOGI("[%s][native] hooked android_dlopen_ext @ %p", ZMOD_ID, target);
-        return true;
     } else {
         LOGE("[%s][native] failed to hook android_dlopen_ext @ %p", ZMOD_ID, target);
         return false;
     }
+
+    // dlsym hook: attempt shadow lookup, otherwise logging-only.
+    void *dlsym_target = resolve_dlsym();
+    if (!dlsym_target) {
+        LOGW("[%s][native] symbol not found: dlsym (skip dlsym hook)", ZMOD_ID);
+        return true;
+    }
+    void *dlsym_orig = nullptr;
+    if (DobbyHook(dlsym_target, to_void_ptr(hooked_dlsym), &dlsym_orig) == 0 && dlsym_orig) {
+        orig_dlsym = reinterpret_cast<dlsym_t>(dlsym_orig);
+        LOGI("[%s][native] hooked dlsym @ %p (shadow-lookup + logging, budget=500)", ZMOD_ID, dlsym_target);
+    } else {
+        LOGW("[%s][native] failed to hook dlsym @ %p (skip dlsym hook)", ZMOD_ID, dlsym_target);
+    }
+    return true;
 }
 
 } // namespace native_hook
