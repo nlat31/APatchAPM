@@ -91,6 +91,11 @@ static inline void fdsan_reset_owner_tag_if_possible(int fd) {
     if (!android_fdsan_exchange_owner_tag) return;
     uint64_t cur = android_fdsan_get_owner_tag(fd);
     if (cur != 0) {
+        // If FDSAN was disabled in libc, exchanging the owner tag might trigger a crash
+        // if called from within a shadow libc. We should just skip resetting.
+        // Actually, we are using the system libc's android_fdsan_exchange_owner_tag!
+        // But let's check error level first, or just wrap in a safe manner if possible.
+        // FDSAN doesn't crash on get_owner_tag. It only crashes on exchange if wrong.
         android_fdsan_exchange_owner_tag(fd, cur, 0);
     }
 #else
@@ -415,9 +420,13 @@ static int new_openat(int dirfd, const char *pathname, int flags, ...) {
                 }
             }
         }
-        return old_openat(dirfd, pathname, flags, mode);
+        int ret = old_openat(dirfd, pathname, flags, mode);
+        if (ret >= 0) fdsan_reset_owner_tag_if_possible(ret);
+        return ret;
     }
-    return old_openat ? old_openat(dirfd, pathname, flags, mode) : -1;
+    int ret = old_openat ? old_openat(dirfd, pathname, flags, mode) : -1;
+    if (ret >= 0) fdsan_reset_owner_tag_if_possible(ret);
+    return ret;
 }
 
 static int new_open(const char *pathname, int flags, ...) {
@@ -443,9 +452,13 @@ static int new_open(const char *pathname, int flags, ...) {
                 }
             }
         }
-        return old_open(pathname, flags, mode);
+        int ret = old_open(pathname, flags, mode);
+        if (ret >= 0) fdsan_reset_owner_tag_if_possible(ret);
+        return ret;
     }
-    return old_open ? old_open(pathname, flags, mode) : -1;
+    int ret = old_open ? old_open(pathname, flags, mode) : -1;
+    if (ret >= 0) fdsan_reset_owner_tag_if_possible(ret);
+    return ret;
 }
 
 static FILE *new_fopen(const char *pathname, const char *mode) {
@@ -542,6 +555,18 @@ bool install(const std::string &package_name, const std::string &app_data_dir) {
     }
 
     g_pkg = package_name;
+
+    // FDSAN Mitigation: Disable FDSAN globally to prevent app crash
+    // The target app uses syscall(SYS_close), leaving stale tags in Bionic's FD table.
+    // When our memfd alters FD allocation, the app reuses a dirty FD and triggers SIGTRAP.
+    // We disable FDSAN purely in the REAL libc to allow these dirty FDs to be reused safely.
+    void *set_level_sym = resolve_sym("android_fdsan_set_error_level");
+    if (set_level_sym) {
+        // ANDROID_FDSAN_ERROR_LEVEL_DISABLED = 0
+        auto set_level = reinterpret_cast<int (*)(int)>(set_level_sym);
+        set_level(0);
+        LOGI("[%s][maps] disabled FDSAN in real libc.so", ZMOD_ID);
+    }
 
     LOGI("[%s][maps] installing open/openat/fopen hooks (pkg=%s)", ZMOD_ID, g_pkg.c_str());
     bool ok = true;
